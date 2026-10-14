@@ -1,0 +1,250 @@
+"""Discover and render RRFS-MPAS forecast hours without inventing missing FHRs.
+
+The existing rrfs_mpas_winter.py generates one forecast hour and writes its
+PNG files + manifest to MPAS_OUT_DIR/site_export. This orchestrator chooses
+actual available hours from the GSL FTP inventory and runs that plotting script
+once per hour, accumulating all results in the same site_export directory.
+
+Example (initial smoke test):
+  python scripts/process_available_hours.py --cycle AUTO --hours 006 --max-hours 1
+
+Example (whole latest cycle, with no batch cap):
+  python scripts/process_available_hours.py --cycle AUTO --hours ALL --max-hours 0
+
+Example (incremental from recent runs, skip already-published hours):
+  python scripts/process_available_hours.py --cycle RECENT --recent-cycles 8 \\
+    --hours ALL --max-hours 6 --skip-published
+
+Use --list-only to inspect the plan without downloads or plotting.
+"""
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+from ftplib import FTP
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+from typing import Any
+
+FTP_HOST = 'gsdftp.fsl.noaa.gov'
+FTP_DIR = '/ncar/upp/det'
+PREFIX = 'runs/cams/rrfs_mpas/winter'
+FILE_RE = re.compile(
+    r'(?P<date>\d{8})(?P<cycle>\d{2})\.rrfs\.t(?P=cycle)z'
+    r'\.testbed\.f(?P<fhr>\d{3})\.conus\.grib2$'
+)
+VALID_DOMAINS = {'lbf', 'regional', 'central_plains'}
+
+
+def list_ftp_files(email: str, retries: int = 3) -> list[str]:
+    for attempt in range(1, retries + 1):
+        try:
+            with FTP(FTP_HOST, timeout=120) as ftp:
+                ftp.set_pasv(True)
+                ftp.login('anonymous', email)
+                ftp.cwd(FTP_DIR)
+                return ftp.nlst()
+        except Exception as exc:
+            if attempt == retries:
+                raise RuntimeError(f'GSL FTP inventory unavailable after {retries} attempts') from exc
+            print(f'FTP inventory attempt {attempt} failed ({exc}); retrying', flush=True)
+            time.sleep(2 * attempt)
+    raise AssertionError('Unreachable')
+
+
+def parse_inventory(names: list[str]) -> dict[str, list[int]]:
+    available: dict[str, set[int]] = defaultdict(set)
+    for name in names:
+        match = FILE_RE.fullmatch(Path(name).name)
+        if match:
+            available[match['date'] + match['cycle']].add(int(match['fhr']))
+    return {cycle: sorted(hours) for cycle, hours in sorted(available.items(), reverse=True)}
+
+
+def parse_requested_hours(spec: str) -> set[int] | None:
+    if spec.strip().upper() == 'ALL':
+        return None
+    result: set[int] = set()
+    for item in spec.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        match = re.fullmatch(r'(\d{1,3})\s*-\s*(\d{1,3})', item)
+        if match:
+            start, end = map(int, match.groups())
+            if end < start:
+                raise ValueError(f'Backward forecast-hour range: {item}')
+            result.update(range(start, end + 1))
+        elif re.fullmatch(r'\d{1,3}', item):
+            result.add(int(item))
+        else:
+            raise ValueError(f'Invalid forecast hour selection: {item!r}')
+    if not result or max(result) > 120:
+        raise ValueError('Specify ALL or valid forecast hours between 000 and 120')
+    return result
+
+
+def selected_cycles(inventory: dict[str,list[int]], cycle_spec: str, recent_cycles: int,
+                    requested: set[int] | None = None) -> list[str]:
+    if not inventory:
+        raise RuntimeError('No RRFS-MPAS testbed files found in GSL FTP listing')
+    spec = cycle_spec.upper().strip()
+    if spec == 'AUTO':
+        # For a specific FHR (e.g. F006), choose the newest cycle which
+        # actually has that FHR, not a newer cycle with F000 only.
+        for cycle, hours in inventory.items():
+            if requested is None or requested.intersection(hours):
+                return [cycle]
+        raise RuntimeError('No GSL cycle contains the requested forecast hour(s)')
+    if spec == 'RECENT':
+        return [cycle for cycle in list(inventory)[:recent_cycles]
+                if requested is None or requested.intersection(inventory[cycle])]
+    if not re.fullmatch(r'\d{10}', spec):
+        raise ValueError('Cycle must be AUTO, RECENT, or YYYYMMDDHH')
+    if spec not in inventory:
+        raise RuntimeError(f'Selected cycle {spec} not in GSL FTP listing')
+    return [spec]
+
+
+def published_domains(index: dict[str, Any]) -> dict[tuple[str,int],set[str]]:
+    found: dict[tuple[str,int],set[str]] = defaultdict(set)
+    for row in index.get('runs', []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            cycle, fhr = str(row['cycle']), int(row['forecast_hour'])
+            if not re.fullmatch(r'\d{10}', cycle):
+                continue
+            if isinstance(row.get('domains'), list):
+                found[(cycle, fhr)].update(str(d) for d in row['domains'])
+        except (KeyError, ValueError, TypeError):
+            continue
+    return dict(found)
+
+
+def get_s3_index() -> dict[str, Any]:
+    # Publishing jobs use S3 directly to avoid re-rendering hours already online.
+    # Fail clearly on AccessDenied rather than silently reprocessing everything.
+    import boto3
+    from botocore.exceptions import ClientError
+    bucket = os.environ.get('AWS_BUCKET')
+    if not bucket:
+        raise RuntimeError('AWS_BUCKET must be configured to skip published hours')
+    s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-2'))
+    try:
+        response = s3.get_object(Bucket=bucket, Key=PREFIX + '/runs.json')
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') in {'404', 'NoSuchKey', 'NotFound'}:
+            return {}
+        raise
+    return json.loads(response['Body'].read())
+
+
+def build_plan(inventory: dict[str,list[int]], cycle_spec: str,
+               requested: set[int] | None, recent_cycles: int,
+               max_hours: int, already: dict[tuple[str,int],set[str]],
+               domains: set[str]) -> tuple[list[tuple[str,int]],int,int]:
+    cycles = selected_cycles(inventory, cycle_spec, recent_cycles, requested)
+    jobs: list[tuple[str,int]] = []
+    matched = 0
+    skipped = 0
+    # Prefer the latest run; each job is bound to one fixed cycle and hour.
+    for cycle in cycles:
+        for fhr in inventory[cycle]:
+            if requested is not None and fhr not in requested:
+                continue
+            matched += 1
+            if domains.issubset(already.get((cycle, fhr), set())):
+                skipped += 1
+                continue
+            jobs.append((cycle, fhr))
+    if requested is not None and matched == 0:
+        raise RuntimeError('No requested forecast hours are available on GSL FTP')
+    return (jobs[:max_hours] if max_hours else jobs), matched, skipped
+
+
+def run_jobs(plan: list[tuple[str,int]], domains: str, script: Path,
+             output: Path, keep_going: bool) -> tuple[list[tuple[str,int]], list[tuple[str,int,str]]]:
+    output.mkdir(parents=True,exist_ok=True)
+    good: list[tuple[str,int]] = []
+    bad: list[tuple[str,int,str]] = []
+    for i, (cycle, hour) in enumerate(plan, start=1):
+        print(f'\n========== Hour {i}/{len(plan)}: {cycle} F{hour:03d} ==========', flush=True)
+        env = dict(os.environ,
+                   MPAS_CYCLE=cycle,
+                   MPAS_FHR=f'{hour:03d}',
+                   MPAS_DOMAINS=domains,
+                   MPAS_OUT_DIR=str(output))
+        try:
+            subprocess.run([sys.executable, str(script)], env=env, check=True)
+            manifest = output / 'site_export' / PREFIX / cycle / f'manifest_f{hour:03d}.json'
+            if not manifest.is_file():
+                raise RuntimeError(f'Plot completed but did not create {manifest}')
+            good.append((cycle, hour))
+        except (subprocess.CalledProcessError, RuntimeError) as exc:
+            bad.append((cycle, hour, str(exc)))
+            print(f'WARNING: {cycle} F{hour:03d} failed: {exc}', flush=True)
+            if not keep_going:
+                break
+    return good, bad
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--cycle', default=os.getenv('MPAS_CYCLE', 'AUTO'))
+    parser.add_argument('--hours', default='ALL', help='ALL, 006, 000-048, or 000,003,006')
+    parser.add_argument('--recent-cycles', type=int, default=8,
+                        help='How many cycles to include when --cycle RECENT')
+    parser.add_argument('--max-hours', type=int, default=6,
+                        help='Limit hours per workflow run; 0 = all available')
+    parser.add_argument('--domains', default=os.getenv('MPAS_DOMAINS', 'lbf'))
+    parser.add_argument('--skip-published', action='store_true',
+                        help='Read existing S3 run index; process only missing cycle/hour/domain')
+    parser.add_argument('--list-only', action='store_true')
+    parser.add_argument('--inventory-file', type=Path,
+                        help='Optional local FTP listing fixture for offline testing')
+    parser.add_argument('--keep-going', action='store_true',
+                        help='Continue with other hours when one download/plot fails')
+    parser.add_argument('--output-dir', type=Path,
+                        default=Path(os.getenv('MPAS_OUT_DIR', './rrfs_mpas_winter_output')))
+    parser.add_argument('--script', type=Path, default=Path('rrfs_mpas_winter.py'))
+    args = parser.parse_args(argv)
+    if args.max_hours < 0 or args.recent_cycles < 1:
+        parser.error('--max-hours must be >= 0 and --recent-cycles must be >= 1')
+    domains = {item.strip() for item in args.domains.split(',') if item.strip()}
+    if not domains or not domains.issubset(VALID_DOMAINS):
+        parser.error('Invalid --domains (use lbf,regional,central_plains)')
+    requested = parse_requested_hours(args.hours)
+    if args.inventory_file:
+        names = args.inventory_file.read_text().splitlines()
+    else:
+        names = list_ftp_files(os.getenv('GSL_FTP_EMAIL','your_email@example.com'))
+    inventory = parse_inventory(names)
+    print('Discovered cycles and file counts:',
+          ', '.join(f'{cycle} ({len(hours)} hours)' for cycle,hours in list(inventory.items())[:12]),flush=True)
+    already = published_domains(get_s3_index()) if args.skip_published else {}
+    plan, matched, skipped = build_plan(
+        inventory, args.cycle, requested, args.recent_cycles,
+        args.max_hours, already, domains)
+    print(f'FTP hours matching selection: {matched}; already published for domains: {skipped};'
+          f' selected this run: {len(plan)}',flush=True)
+    print('Selected:', ', '.join(f'{cycle} F{hour:03d}' for cycle,hour in plan) or '(none)',flush=True)
+    if args.list_only or not plan:
+        if not plan:
+            print('No pending forecast hours. This is normal if they have all been published.')
+        return 0
+    good,bad = run_jobs(plan, args.domains, args.script, args.output_dir, args.keep_going)
+    print(f'Completed {len(good)} forecast hours; failed {len(bad)}',flush=True)
+    for cycle,fhr,message in bad:
+        print(f'FAILED {cycle} F{fhr:03d}: {message}',flush=True)
+    if bad and not args.keep_going:
+        return 1
+    return 0 if good or not bad else 1
+
+if __name__=='__main__':
+    raise SystemExit(main())
