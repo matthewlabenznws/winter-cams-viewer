@@ -1,0 +1,8 @@
+numpy>=1.26,<3
+scipy>=1.13,<2
+matplotlib>=3.8,<4
+cartopy>=0.23,<1
+eccodes>=2.36,<3
+pillow>=10,<13
+shapely>=2,<3
+boto3>=1.34,<2
