@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111111">
+  <meta name="description" content="Winter CAMs forecast viewer for experimental RRFS-MPAS model graphics across the North Platte region.">
+  <title>Winter CAMs Viewer | North Platte</title>
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/config.js" defer></script>
+  <script src="assets/viewer.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="masthead">
+      <div class="masthead-spacer" aria-hidden="true"></div>
+      <h1 class="site-title">Winter CAMs Viewer</h1>
+      <div class="masthead-credit">Created by <strong>Matthew Labenz</strong></div>
+    </div>
+    <nav class="subbar model-nav" aria-label="Winter forecast models">
+      <span class="model-coming" title="HRRR winter graphics will be added later">HRRR</span>
+      <span class="nav-divider" aria-hidden="true">/</span>
+      <span class="model-coming" title="RRFS winter graphics will be added later">RRFS</span>
+      <span class="nav-divider" aria-hidden="true">/</span>
+      <a class="model-link nav-active" href="./" aria-current="page">RRFS-MPAS</a>
+    </nav>
+  </header>
+  <main>
+    <section class="topbar" aria-label="Forecast controls">
+      <h2 class="toolbar-heading" id="viewerTitle">RRFS-MPAS Winter Graphics</h2>
+      <label for="viewSelect">View:</label>
+      <select id="viewSelect" aria-label="View mode">
+        <option value="single">Single Panel</option>
+        <option value="compare_products">Compare Products</option>
+      </select>
+      <label for="modelSelect">Model:</label>
+      <select id="modelSelect" aria-label="Model">
+        <option value="rrfs_mpas">RRFS-MPAS</option>
+        <option value="hrrr" disabled>HRRR (coming later)</option>
+        <option value="rrfs" disabled>RRFS (coming later)</option>
+      </select>
+      <label for="productSelect">Product:</label>
+      <select id="productSelect" aria-label="Product" disabled>
+        <option value="">Awaiting products</option>
+      </select>
+      <span id="rightProductBlock" class="extra-product" hidden>
+        <label for="rightProductSelect">Right Product:</label>
+        <select id="rightProductSelect" aria-label="Right panel product"></select>
+      </span>
+      <label for="runSelect">Run:</label>
+      <select id="runSelect" aria-label="Model run" disabled>
+        <option value="">Awaiting runs</option>
+      </select>
+      <label for="domainSelect">Domain:</label>
+      <select id="domainSelect" aria-label="Forecast domain">
+        <option value="lbf">LBF</option>
+        <option value="regional">Regional</option>
+        <option value="central_plains">Central Plains</option>
+      </select>
+    </section>
+
+    <section class="controls" aria-label="Animation and forecast hour">
+      <button id="playBtn" disabled type="button" title="Play available forecast hours">▶ Play</button>
+      <button id="latestBtn" disabled type="button" title="Select the latest published model run">Latest</button>
+      <input id="slider" type="range" min="0" max="0" value="0" step="1" disabled aria-label="Forecast hour">
+      <span id="fhrLabel" class="fhr-label">---</span>
+    </section>
+
+    <section class="save-controls" aria-label="Image actions and forecast information">
+      <button id="savePngBtn" type="button" disabled>Save PNG</button>
+      <button id="refreshBtn" type="button">Refresh Runs</button>
+      <div class="valid-time" aria-live="polite">
+        <span class="valid-time-label">FORECAST VALID</span>
+        <strong id="validTime">Waiting for first model run</strong>
+      </div>
+      <span id="siteStatus" class="status" role="status" aria-live="polite">Checking S3 for winter forecast graphics…</span>
+    </section>
+
+    <section id="tiles" class="tiles" aria-label="Available forecast hours"></section>
+
+    <section id="plotWrap" class="plot-wrap" aria-label="Winter forecast map">
+      <article class="plot-panel">
+        <div class="panel-heading" aria-live="polite">
+          <h2 class="panel-title" id="plotTitle">RRFS-MPAS Winter Forecast</h2>
+          <span id="frameMeta" class="frame-meta"></span>
+        </div>
+        <div class="image-stage" id="imageStage">
+          <img id="plotImage" class="plot-image" alt="" hidden>
+          <div id="emptyState" class="empty-state">
+            <h3 id="emptyTitle">Awaiting RRFS-MPAS winter graphics</h3>
+            <p id="emptyDetails">Published forecast maps will display here when the first model run is available on AWS S3.</p>
+          </div>
+        </div>
+        <div class="map-footnote">
+          <span id="mapCaption">RRFS-MPAS winter graphics · Awaiting first published run</span>
+          <a id="fullImageLink" href="#" target="_blank" rel="noopener noreferrer" hidden>Open original PNG ↗</a>
+        </div>
+      </article>
+      <article class="plot-panel right-panel" id="rightPanel" hidden>
+        <h2 id="rightPanelTitle" class="panel-title"></h2>
+        <div class="image-stage" id="rightStage">
+          <img id="rightPlotImage" class="plot-image" alt="" hidden>
+          <div class="empty-state compact-empty" id="rightEmptyState" hidden>
+            <h3 id="rightEmptyTitle">Awaiting second product</h3>
+            <p id="rightEmptyDetails">Choose a second winter product above.</p>
+          </div>
+        </div>
+        <div class="map-footnote"><a id="rightFullImageLink" href="#" target="_blank" rel="noopener noreferrer" hidden>Open original PNG ↗</a></div>
+      </article>
+    </section>
+  </main>
+
+  <footer class="footer">
+    Experimental model guidance for evaluation · Not an official NWS forecast.
+  </footer>
+</body>
+</html>
