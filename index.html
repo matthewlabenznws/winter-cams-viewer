@@ -31,7 +31,8 @@
       <label for="viewSelect">View:</label>
       <select id="viewSelect" aria-label="View mode">
         <option value="single">Single Panel</option>
-        <option value="compare_products">Compare Products</option>
+        <option value="compare_products">Two Panels</option>
+        <option value="four_panel">Four Panels</option>
       </select>
       <label for="modelSelect">Model:</label>
       <select id="modelSelect" aria-label="Model">
@@ -44,8 +45,16 @@
         <option value="">Awaiting products</option>
       </select>
       <span id="rightProductBlock" class="extra-product" hidden>
-        <label for="rightProductSelect">Right Product:</label>
+        <label for="rightProductSelect">Panel 2:</label>
         <select id="rightProductSelect" aria-label="Right panel product"></select>
+      </span>
+      <span id="thirdProductBlock" class="extra-product" hidden>
+        <label for="thirdProductSelect">Panel 3:</label>
+        <select id="thirdProductSelect" aria-label="Third panel product"></select>
+      </span>
+      <span id="fourthProductBlock" class="extra-product" hidden>
+        <label for="fourthProductSelect">Panel 4:</label>
+        <select id="fourthProductSelect" aria-label="Fourth panel product"></select>
       </span>
       <label for="runSelect">Run:</label>
       <select id="runSelect" aria-label="Model run" disabled>
@@ -88,7 +97,7 @@
           <img id="plotImage" class="plot-image" alt="" hidden>
           <div id="emptyState" class="empty-state">
             <h3 id="emptyTitle">Awaiting RRFS-MPAS winter graphics</h3>
-            <p id="emptyDetails">Published forecast maps will display here when the first model run is available on AWS S3.</p>
+            <p id="emptyDetails">Published forecast maps will display here once available. F000 is intentionally disabled.</p>
           </div>
         </div>
         <div class="map-footnote">
@@ -106,6 +115,28 @@
           </div>
         </div>
         <div class="map-footnote"><a id="rightFullImageLink" href="#" target="_blank" rel="noopener noreferrer" hidden>Open original PNG ↗</a></div>
+      </article>
+      <article class="plot-panel additional-panel" id="thirdPanel" hidden>
+        <h2 id="thirdPanelTitle" class="panel-title"></h2>
+        <div class="image-stage">
+          <img id="thirdPlotImage" class="plot-image" alt="" hidden>
+          <div class="empty-state compact-empty" id="thirdEmptyState" hidden>
+            <h3 id="thirdEmptyTitle">Awaiting third product</h3>
+            <p id="thirdEmptyDetails">Select a third winter product above.</p>
+          </div>
+        </div>
+        <div class="map-footnote"><a id="thirdFullImageLink" href="#" target="_blank" rel="noopener noreferrer" hidden>Open original PNG ↗</a></div>
+      </article>
+      <article class="plot-panel additional-panel" id="fourthPanel" hidden>
+        <h2 id="fourthPanelTitle" class="panel-title"></h2>
+        <div class="image-stage">
+          <img id="fourthPlotImage" class="plot-image" alt="" hidden>
+          <div class="empty-state compact-empty" id="fourthEmptyState" hidden>
+            <h3 id="fourthEmptyTitle">Awaiting fourth product</h3>
+            <p id="fourthEmptyDetails">Select a fourth winter product above.</p>
+          </div>
+        </div>
+        <div class="map-footnote"><a id="fourthFullImageLink" href="#" target="_blank" rel="noopener noreferrer" hidden>Open original PNG ↗</a></div>
       </article>
     </section>
   </main>
