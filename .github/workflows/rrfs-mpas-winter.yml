@@ -48,7 +48,8 @@ jobs:
     env:
       MPLBACKEND: Agg
       PYTHONUNBUFFERED: '1'
-      MPAS_OUT_DIR: ${{ runner.temp }}/rrfs_mpas_winter_output
+      # Avoid runner.temp here: runner context is unavailable in jobs.<job_id>.env.
+      MPAS_OUT_DIR: ${{ github.workspace }}/rrfs_mpas_winter_output
       MPAS_ASSET_DIR: ${{ github.workspace }}/assets
       MPAS_FETCH_ROADS: '1'
       MPAS_REQUIRE_MAP_ASSETS: ${{ (inputs.publish == true || github.event_name == 'schedule') && '1' || '0' }}
