@@ -1,4 +1,4 @@
-/* Winter CAMs — aligned with the original LBF CAMs viewer visual styling */
+/* Winter CAMs â€” aligned with the original LBF CAMs viewer visual styling */
 :root {color-scheme: dark;--bg:#080808;--dark:#111;--panel:#1b1b1b;--line:#333;--accent:#6ea8ff;--blue:#2b7cff;--text:#fff}
 * {box-sizing:border-box}
 html {background:var(--bg);min-height:100%}
@@ -200,4 +200,68 @@ body.four-panel-mode .footer {display:none}
   body.four-panel-mode .masthead {padding:6px 10px}
   body.four-panel-mode .model-nav {padding:6px 10px}
   body.four-panel-mode .topbar {padding:6px 10px}
+}
+
+
+/* OPTIONAL ENLARGED FOUR-PANEL VIEW
+   Four detailed maps and a full controls/header cannot both be large within
+   a short laptop viewport. This mode trades the top menus for bigger maps.
+   The plot image files remain fully visible at their natural aspect ratio;
+   nothing is cropped or stretched. Escape or the button returns to editing. */
+body.four-panel-mode .controls {
+  grid-template-columns:auto auto minmax(140px,1fr) auto auto;
+}
+#fourFocusBtn {
+  white-space:nowrap;
+  background:#253958;
+  border-color:#6ea8ff;
+  padding:6px 11px;
+}
+#fourFocusBtn[hidden] {display:none!important}
+body.four-panel-mode.four-focus .site-header,
+body.four-panel-mode.four-focus .topbar,
+body.four-panel-mode.four-focus .save-controls,
+body.four-panel-mode.four-focus .footer {
+  display:none!important;
+}
+body.four-panel-mode.four-focus .controls {
+  padding:7px 12px;
+}
+body.four-panel-mode.four-focus .tiles {
+  padding:5px 10px;
+}
+body.four-panel-mode.four-focus .plot-wrap.four {
+  gap:7px 10px;
+  padding:3px 8px 5px;
+}
+body.four-panel-mode.four-focus .plot-wrap.four .plot-image {
+  border-radius:4px;
+}
+body.four-panel-mode.four-focus .plot-wrap.four .panel-title {
+  font-size:clamp(12px,1.1vw,16px);
+}
+body.four-panel-mode.four-focus .plot-wrap.four .map-footnote {
+  min-height:11px;
+  font-size:10px;
+  line-height:11px;
+}
+@media(max-width:680px) {
+  body.four-panel-mode .controls {
+    grid-template-columns:auto auto 1fr auto;
+  }
+  body.four-panel-mode #fourFocusBtn {
+    grid-column:1/-1;
+    grid-row:3;
+    justify-self:center;
+  }
+  body.four-panel-mode.four-focus #fourFocusBtn {
+    grid-column:4;
+    grid-row:1;
+    font-size:11px;
+    padding:5px;
+  }
+  body.four-panel-mode.four-focus .controls {
+    grid-template-columns:auto auto 1fr auto;
+    gap:6px;
+  }
 }
