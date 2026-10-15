@@ -287,6 +287,5 @@ def main(argv: list[str] | None = None) -> int:
     if bad and not args.keep_going:
         return 1
     return 0 if good or not bad else 1
-
 if __name__=='__main__':
     raise SystemExit(main())
