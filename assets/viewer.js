@@ -165,7 +165,26 @@
       empty:'fourthEmpty', emptyTitle:'fourthEmptyTitle', emptyDetails:'fourthEmptyDetails',
       title:'fourthTitle', link:'fourthFullLink'}
   };
+  // Keep all four maps in the visible viewport rather than letting the second
+  // row extend below the fold. The image files remain at original resolution.
+  let fourFitPending = false;
+  function scheduleFourPanelFit() {
+    if (fourFitPending) return;
+    fourFitPending = true;
+    requestAnimationFrame(() => {
+      fourFitPending = false;
+      const wrap = byId('plotWrap');
+      if (!isFour()) {
+        wrap.style.removeProperty('--four-fit-height');
+        return;
+      }
+      const top = Math.max(0, wrap.getBoundingClientRect().top);
+      const available = Math.max(180, Math.floor(window.innerHeight - top - 7));
+      wrap.style.setProperty('--four-fit-height', available + 'px');
+    });
+  }
   function setCompareView() {
+    document.body.classList.toggle('four-panel-mode', isFour());
     els.view.value = state.view;
     els.rightBlock.hidden = !isCompare();
     els.rightPanel.hidden = !isCompare();
@@ -178,6 +197,8 @@
     wrap.classList.toggle('four', isFour());
     els.save.textContent = isFour() ? 'Save Four-Panel PNG' :
                            isCompare() ? 'Save Two-Panel PNG' : 'Save PNG';
+    if (isFour() && window.scrollY > 0) window.scrollTo(0,0);
+    scheduleFourPanelFit();
   }
   function updateSaveButton() {
     els.save.disabled = !activeSlots().every(slot => slot === 'product' ? state.leftLoaded :
@@ -340,6 +361,7 @@
         fragment.appendChild(btn);
       }
       els.tiles.appendChild(fragment);
+      scheduleFourPanelFit();
     }
     // Update the active border only; don't rebuild/flash 49 tile elements.
     for (const btn of els.tiles.children) {
@@ -753,5 +775,14 @@
     stopAnimation();
     chooseHour(next);
   });
+  window.addEventListener('resize', scheduleFourPanelFit, {passive:true});
+  window.addEventListener('orientationchange', scheduleFourPanelFit);
+  if (typeof ResizeObserver !== 'undefined') {
+    const fitObserver = new ResizeObserver(scheduleFourPanelFit);
+    for (const target of ['.site-header','.topbar','.controls','.save-controls','.tiles']) {
+      const element = document.querySelector(target);
+      if (element) fitObserver.observe(element);
+    }
+  }
   refreshRuns(false);
 })();
