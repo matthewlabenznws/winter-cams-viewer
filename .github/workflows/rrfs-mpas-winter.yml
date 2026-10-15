@@ -1,6 +1,6 @@
 name: RRFS-MPAS Winter | All Available Forecast Hours
 
-# First use Actions > Run workflow manually. Once a test upload succeeds,
+# Includes optional QPF backfill of already-published hours. Once the test succeeds,
 # uncomment the schedule below for incremental processing of new FHRs.
 on:
   workflow_dispatch:
@@ -27,6 +27,11 @@ on:
         type: string
       publish:
         description: 'Publish completed graphics to AWS S3 (off for initial test)'
+        required: true
+        default: false
+        type: boolean
+      rebuild_existing_hours:
+        description: 'When publishing, re-render hours even if their domains are already in S3 (use to repair missing QPF)'
         required: true
         default: false
         type: boolean
@@ -114,6 +119,7 @@ jobs:
           DOMAINS_ARG: ${{ inputs.domains || 'lbf,regional,central_plains' }}
           MAX_HOURS_ARG: ${{ inputs.max_hours || '6' }}
           PUBLISH_ARG: ${{ (inputs.publish == true || github.event_name == 'schedule') && 'true' || 'false' }}
+          REBUILD_ARG: ${{ inputs.rebuild_existing_hours && 'true' || 'false' }}
         run: |
           cmd=(python scripts/process_available_hours.py
                --cycle "$CYCLE_ARG"
@@ -121,7 +127,9 @@ jobs:
                --domains "$DOMAINS_ARG"
                --max-hours "$MAX_HOURS_ARG"
                --keep-going)
-          if [[ "$PUBLISH_ARG" == 'true' ]]; then
+          # Rebuild can repair QPF missing from previously-published hours.
+          # A dry-run always plots requested hours, regardless of S3 contents.
+          if [[ "$PUBLISH_ARG" == 'true' && "$REBUILD_ARG" != 'true' ]]; then
             cmd+=(--skip-published)
           fi
           "${cmd[@]}"
@@ -133,7 +141,19 @@ jobs:
           if [[ -d "$root" ]] && find "$root" -name 'manifest_f*.json' -print -quit | grep -q .; then
             python scripts/publish_rrfs_mpas_winter.py --stage "$MPAS_OUT_DIR/site_export" --dry-run
           else
-            echo 'No new forecast hours to stage; either all already published or no new GSL files.'
+            echo 'No new forecast-hour manifests were produced.'
+            echo "Expected output: $root"
+            echo 'Diagnostic listing of winter output directories:'
+            if [[ -d "$MPAS_OUT_DIR" ]]; then
+              find "$MPAS_OUT_DIR" -maxdepth 6 -type f | head -60 || true
+            else
+              echo "MPAS_OUT_DIR does not exist: $MPAS_OUT_DIR"
+            fi
+            if [[ "${{ github.event_name }}" == 'workflow_dispatch' && "${{ inputs.publish }}" == 'false' ]]; then
+              echo '::error::Dry-run produced no PNG manifests. Inspect the FTP inventory/render step above for why.'
+              exit 1
+            fi
+            echo 'No unpublished forecast hours; skipping staging validation.'
           fi
 
       - name: Publish newly generated hours and merge runs.json into S3
@@ -152,6 +172,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rrfs-mpas-winter-hourly-preview
-          path: ${{ runner.temp }}/rrfs_mpas_winter_output/site_export/runs/cams/rrfs_mpas/winter/
+          path: ${{ github.workspace }}/rrfs_mpas_winter_output/site_export/runs/cams/rrfs_mpas/winter/
           if-no-files-found: warn
           retention-days: 2
