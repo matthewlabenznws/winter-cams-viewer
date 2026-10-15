@@ -5,6 +5,11 @@ PNG files + manifest to MPAS_OUT_DIR/site_export. This orchestrator chooses
 actual available hours from the GSL FTP inventory and runs that plotting script
 once per hour, accumulating all results in the same site_export directory.
 
+For long runs, print per-hour QPF availability diagnostics and delete the original
+GRIB2 input after successfully staging that forecast hour. This prevents filling
+the GitHub runner disk with dozens of large raw files.
+
+
 Example (initial smoke test):
   python scripts/process_available_hours.py --cycle AUTO --hours 006 --max-hours 1
 
@@ -173,6 +178,8 @@ def run_jobs(plan: list[tuple[str,int]], domains: str, script: Path,
     output.mkdir(parents=True,exist_ok=True)
     good: list[tuple[str,int]] = []
     bad: list[tuple[str,int,str]] = []
+    missing_qpf: list[tuple[str,int,list[str]]] = []
+    with_qpf = 0
     for i, (cycle, hour) in enumerate(plan, start=1):
         print(f'\n========== Hour {i}/{len(plan)}: {cycle} F{hour:03d} ==========', flush=True)
         env = dict(os.environ,
@@ -185,12 +192,47 @@ def run_jobs(plan: list[tuple[str,int]], domains: str, script: Path,
             manifest = output / 'site_export' / PREFIX / cycle / f'manifest_f{hour:03d}.json'
             if not manifest.is_file():
                 raise RuntimeError(f'Plot completed but did not create {manifest}')
+            # QPF is only published when the GRIB has a true cumulative
+            # 0-to-forecast-hour accumulation. Report missing products explicitly,
+            # rather than letting the frontend silently remove them from its menu.
+            data = json.loads(manifest.read_text(encoding='utf-8'))
+            domain_products = data.get('domains', {})
+            missing_domains = [d for d in domains.split(',') if
+                               'qpf' not in domain_products.get(d.strip(), {})]
+            if missing_domains:
+                print(f'QPF CHECK {cycle} F{hour:03d}: NOT STAGED '
+                      f'(domains: {", ".join(missing_domains)})', flush=True)
+                if hour != 0:
+                    missing_qpf.append((cycle, hour, missing_domains))
+            else:
+                with_qpf += 1
+                print(f'QPF CHECK {cycle} F{hour:03d}: OK '
+                      '(true cumulative QPF PNG staged)', flush=True)
             good.append((cycle, hour))
+            # A full 48-hour run may contain tens of gigabytes of raw GRIB
+            # downloads; the rendered PNGs are retained in site_export.
+            grib_file = output / (f'{cycle[:8]}.rrfs.t{cycle[8:]}z.'
+                                  f'testbed.f{hour:03d}.conus.grib2')
+            if grib_file.is_file():
+                size_mb = grib_file.stat().st_size / (1024 ** 2)
+                grib_file.unlink()
+                print(f'Cleaned raw GRIB F{hour:03d} ({size_mb:.1f} MiB); '
+                      'staged PNGs retained', flush=True)
         except (subprocess.CalledProcessError, RuntimeError) as exc:
             bad.append((cycle, hour, str(exc)))
             print(f'WARNING: {cycle} F{hour:03d} failed: {exc}', flush=True)
             if not keep_going:
                 break
+    print(f'\nQPF SUMMARY: {with_qpf} hour(s) with QPF; '
+          f'{len(missing_qpf)} forecast hour(s) missing QPF (excluding F000).',
+          flush=True)
+    for cycle, hour, missing_domains in missing_qpf:
+        print(f'  MISSING QPF: {cycle} F{hour:03d} '
+              f'[{", ".join(missing_domains)}]', flush=True)
+    if missing_qpf:
+        print('Check GRIB precipitation stepType and stepRange. The plotter '
+              'currently requires an exact 0-F cumulative QPF field. '
+              'Do NOT substitute the latest 1-hour increment as a total.', flush=True)
     return good, bad
 
 
