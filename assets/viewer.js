@@ -22,9 +22,9 @@
     tadv_925mb: '925-mb Temperature Advection',
     tadv_850mb: '850-mb Temperature Advection',
     tadv_700mb: '700-mb Temperature Advection',
-    fgen_925mb: '925-mb Frontogenesis',
-    fgen_850mb: '850-mb Frontogenesis',
-    fgen_700mb: '700-mb Frontogenesis',
+    fgen_925mb: '925-mb Advection + Frontogenesis',
+    fgen_850mb: '850-mb Advection + Frontogenesis',
+    fgen_700mb: '700-mb Advection + Frontogenesis',
     thickness_mslp: '1000–500-mb Thickness + MSLP'
   };
   const PRODUCT_ORDER = Object.keys(PRODUCT_LABELS);
@@ -51,6 +51,8 @@
     manifest: null,
     imageUrl: null,
     timer: null,
+    playing: false,
+    playGeneration: 0,
     serial: 0,
     cacheToken: Date.now(),
     ready: false
@@ -73,6 +75,62 @@
     fullLink: byId('fullImageLink')
   };
   const manifestCache = new Map();
+  // A small sliding window of PNGs makes playback smooth without keeping an
+  // entire high-resolution model run in memory.
+  const imageCache = new Map();
+  const MAX_CACHED_IMAGES = 8;
+
+  function preloadImage(url) {
+    const cached = imageCache.get(url);
+    if (cached) {
+      imageCache.delete(url);
+      imageCache.set(url, cached);
+      return cached;
+    }
+    const promise = new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(url);
+      img.onerror = () => reject(new Error('Forecast PNG could not be loaded from S3'));
+      img.src = url;
+    });
+    imageCache.set(url, promise);
+    while (imageCache.size > MAX_CACHED_IMAGES) {
+      imageCache.delete(imageCache.keys().next().value);
+    }
+    promise.catch(() => {
+      if (imageCache.get(url) === promise) imageCache.delete(url);
+    });
+    return promise;
+  }
+
+  // Prepare the next published hour in the background. No need to wait for a
+  // complete model run; the run index lists hours individually as they arrive.
+  async function prefetchNextHour(cycle, hour, domain, products) {
+    const entries = entriesForCycle(cycle);
+    const i = entries.findIndex(entry => entry.forecast_hour === hour);
+    if (entries.length < 2 || i === -1) return;
+    const next = entries[(i + 1) % entries.length];
+    let manifest = manifestCache.get(next.manifest);
+    if (!manifest) {
+      try {
+        const response = await fetch(dataUrl(next.manifest));
+        if (!response.ok) return;
+        const candidate = await response.json();
+        if (candidate.model !== 'rrfs_mpas' || candidate.cycle !== cycle ||
+            candidate.forecast_hour !== next.forecast_hour || !candidate.domains) return;
+        manifestCache.set(next.manifest, candidate);
+        manifest = candidate;
+      } catch (_) { return; }
+    }
+    const images = manifest.domains?.[domain] || {};
+    for (const product of products) {
+      const relative = images[product];
+      if (typeof relative !== 'string' ||
+          !/^\d{10}\/(lbf|regional|central_plains)\/[\w.-]+\.png$/.test(relative) ||
+          !relative.startsWith(cycle + '/' + domain + '/')) continue;
+      preloadImage(dataUrl(relative) + '?v=' + state.cacheToken).catch(() => {});
+    }
+  }
 
   const isCompare = () => state.view === 'compare_products';
   function setCompareView() {
@@ -150,7 +208,9 @@
       .sort((a, b) => a.forecast_hour - b.forecast_hour);
   }
   function stopAnimation() {
-    if (state.timer !== null) window.clearInterval(state.timer);
+    state.playing = false;
+    state.playGeneration += 1;
+    if (state.timer !== null) window.clearTimeout(state.timer);
     state.timer = null;
     els.play.textContent = '▶ Play';
     els.play.setAttribute('aria-pressed', 'false');
@@ -179,23 +239,36 @@
     els.fhr.textContent = Number.isInteger(state.hour) ? fmtTile(state.hour) : '---';
     els.play.disabled = hours.length < 2;
     els.latest.disabled = !hours.length;
-    els.tiles.replaceChildren();
-    if (!hours.length) return;
-    const available = new Set(hours);
-    const fragment = document.createDocumentFragment();
-    for (let hour = 0; hour <= max; hour++) {
-      const exists = available.has(hour);
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = fmtTile(hour);
-      btn.className = 'frame ' + (exists ? 'available' : 'missing') + (hour === state.hour ? ' active' : '');
-      btn.disabled = !exists;
-      btn.setAttribute('aria-label', fmtHour(hour) + (exists ? ' available' : ' not published'));
-      if (hour === state.hour) btn.setAttribute('aria-current', 'true');
-      if (exists) btn.addEventListener('click', () => chooseHour(hour));
-      fragment.appendChild(btn);
+    const signature = state.cycle + '|' + hours.join(',');
+    if (els.tiles.dataset.signature !== signature) {
+      els.tiles.replaceChildren();
+      els.tiles.dataset.signature = signature;
+      const available = new Set(hours);
+      const fragment = document.createDocumentFragment();
+      for (let hour = 0; hour <= max; hour++) {
+        const exists = available.has(hour);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = fmtTile(hour);
+        btn.className = 'frame ' + (exists ? 'available' : 'missing');
+        btn.disabled = !exists;
+        btn.dataset.hour = String(hour);
+        btn.setAttribute('aria-label', fmtHour(hour) + (exists ? ' available' : ' not published'));
+        if (exists) btn.addEventListener('click', () => {
+          stopAnimation();
+          void chooseHour(hour);
+        });
+        fragment.appendChild(btn);
+      }
+      els.tiles.appendChild(fragment);
     }
-    els.tiles.appendChild(fragment);
+    // Update the active border only; don't rebuild/flash 49 tile elements.
+    for (const btn of els.tiles.children) {
+      const active = Number(btn.dataset.hour) === state.hour;
+      btn.classList.toggle('active', active);
+      if (active) btn.setAttribute('aria-current', 'true');
+      else btn.removeAttribute('aria-current');
+    }
   }
   function resetForNoRuns(message, level = 'warning') {
     ++state.serial;
@@ -273,20 +346,23 @@
   }
   async function loadCurrent() {
     const selected = state.entries.find(e => e.cycle === state.cycle && e.forecast_hour === state.hour);
-    if (!selected) return;
+    if (!selected) return false;
     const serial = ++state.serial;
     const key = selected.manifest;
     renderHourControls();
     els.fhr.textContent = fmtTile(state.hour);
     els.validTime.textContent = utcTime(selected.valid_time_utc);
-    els.title.textContent = isCompare() ? productLabel(state.product) : `RRFS-MPAS | ${productLabel(state.product)}`;
-    els.viewerTitle.textContent = isCompare() ? 'RRFS-MPAS Product Comparison' : `RRFS-MPAS ${productLabel(state.product)}`;
-    empty('Loading winter forecast…', 'Retrieving the available forecast maps for this hour.');
     status('Loading ' + state.cycle + 'Z ' + fmtHour(state.hour) + '…');
+    // IMPORTANT: do not clear/hide the current PNG while the next hour loads.
+    if (els.image.hidden) {
+      els.empty.hidden = false;
+      els.emptyTitle.textContent = 'Loading winter forecast…';
+      els.emptyDetails.textContent = 'Retrieving the available forecast map for this hour.';
+    }
     try {
       let manifest = manifestCache.get(key);
       if (!manifest) {
-        const response = await fetch(dataUrl(key), { cache: 'no-store' });
+        const response = await fetch(dataUrl(key));
         if (!response.ok) throw new Error(`HTTP ${response.status} reading ${key}`);
         manifest = await response.json();
         if (manifest.model !== 'rrfs_mpas' || manifest.cycle !== selected.cycle ||
@@ -296,19 +372,24 @@
         }
         manifestCache.set(key, manifest);
       }
-      if (serial !== state.serial) return; // Ignore old responses after controls change.
+      if (serial !== state.serial) return false;
+      const loaded = await showManifest(manifest, serial);
+      if (serial !== state.serial) return false;
+      if (!loaded) return false;
       state.manifest = manifest;
-      showManifest(manifest);
       status(`Run ${state.cycle}Z · ${fmtHour(state.hour)} · ${utcTime(manifest.valid_time_utc)}`, 'success');
       syncAddress();
+      return true;
     } catch (err) {
-      if (serial !== state.serial) return;
-      state.manifest = null;
-      empty('Forecast map unavailable', 'Could not load the published manifest for this forecast hour.');
+      if (serial !== state.serial) return false;
+      // The prior PNG is intentionally left visible on a temporary S3 error.
+      if (els.image.hidden) empty('Forecast map unavailable', 'Could not load the published forecast hour.');
       status('Map unavailable: ' + err.message, 'error');
+      return false;
     }
   }
-  function showManifest(manifest) {
+
+  async function showManifest(manifest, serial = state.serial) {
     const available = manifest.domains[state.domain] || {};
     const keys = Object.keys(available).filter(k => typeof available[k] === 'string');
     keys.sort((a, b) => {
@@ -316,13 +397,11 @@
       const bi = PRODUCT_ORDER.indexOf(b);
       return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi) || a.localeCompare(b);
     });
-    // The dropdown displays only products published for the selected hour/domain.
     setSelectOptions(els.product, keys.map(k => [k, productLabel(k)]), state.product);
     if (!keys.length) {
       empty('No maps for this domain', `No ${DOMAIN_LABELS[state.domain]} maps are published for ${fmtHour(state.hour)}.`);
       els.title.textContent = 'RRFS-MPAS | No published maps';
-      els.caption.textContent = `Run ${state.cycle}Z · ${fmtHour(state.hour)} · ${DOMAIN_LABELS[state.domain]}`;
-      return;
+      return false;
     }
     state.product = els.product.value;
     setSelectOptions(els.rightProduct, keys.map(k => [k, productLabel(k)]), state.rightProduct);
@@ -331,120 +410,132 @@
       if (alternative) els.rightProduct.value = alternative;
     }
     state.rightProduct = els.rightProduct.value;
-    const path = available[state.product];
-    const expectedStart = state.cycle + '/' + state.domain + '/';
-    if (typeof path !== 'string' || !path.startsWith(expectedStart) ||
-        path.includes('..') || path.includes('\\') || path.includes('?') || path.includes('#') ||
-        !/^\d{10}\/(lbf|regional|central_plains)\/[\w.-]+\.png$/.test(path)) {
-      empty('Published image unavailable', 'The selected product contains an invalid or missing image path.');
-      status('Invalid image path in published manifest.', 'error');
-      return;
+    const validPath = path => typeof path === 'string' &&
+      /^\d{10}\/(lbf|regional|central_plains)\/[\w.-]+\.png$/.test(path) &&
+      path.startsWith(state.cycle + '/' + state.domain + '/');
+    const leftPath = available[state.product];
+    const rightPath = isCompare() ? available[state.rightProduct] : null;
+    if (!validPath(leftPath) || (isCompare() && !validPath(rightPath))) {
+      status('No published PNG exists for the selected product and hour.', 'warning');
+      if (els.image.hidden) empty('Published image unavailable', 'The selected PNG is missing from this manifest.');
+      return false;
     }
-    const url = dataUrl(path) + '?v=' + state.cacheToken;
-    state.imageUrl = url;
-    els.title.textContent = isCompare() ? productLabel(state.product) : `RRFS-MPAS | ${productLabel(state.product)}`;
-    els.viewerTitle.textContent = isCompare() ? 'RRFS-MPAS Product Comparison' : `RRFS-MPAS ${productLabel(state.product)}`;
-    els.meta.textContent = `${DOMAIN_LABELS[state.domain].toUpperCase()} · ${fmtHour(state.hour)}`;
-    els.caption.textContent = `${state.cycle}Z run · Valid ${utcTime(manifest.valid_time_utc)} · ${DOMAIN_LABELS[state.domain]}`;
+    const leftUrl = dataUrl(leftPath) + '?v=' + state.cacheToken;
+    const rightUrl = isCompare() ? dataUrl(rightPath) + '?v=' + state.cacheToken : null;
+    const selectedHour = state.hour;
+    const selectedCycle = state.cycle;
+    const selectedDomain = state.domain;
+    const selectedProducts = isCompare() ? [state.product, state.rightProduct] : [state.product];
     state.leftLoaded = false;
     state.rightLoaded = false;
     updateSaveButton();
-    els.image.hidden = true;
-    els.image.alt = `${productLabel(state.product)} for ${DOMAIN_LABELS[state.domain]}, valid ${utcTime(manifest.valid_time_utc)}`;
-    els.image.onload = () => {
-      if (state.imageUrl !== url) return;
-      els.empty.hidden = true;
+    if (els.image.hidden) {
+      els.empty.hidden = false;
+      els.emptyTitle.textContent = 'Loading forecast image…';
+      els.emptyDetails.textContent = 'The forecast image is being fetched from AWS S3.';
+    }
+    try {
+      // Fetch both images before changing either displayed panel; the old
+      // images stay in place until the full next frame is ready.
+      await Promise.all([preloadImage(leftUrl), ...(rightUrl ? [preloadImage(rightUrl)] : [])]);
+      if (serial !== state.serial) return false;
+      state.imageUrl = leftUrl;
+      els.image.alt = `${productLabel(state.product)} for ${DOMAIN_LABELS[selectedDomain]}, valid ${utcTime(manifest.valid_time_utc)}`;
+      els.image.src = leftUrl;
       els.image.hidden = false;
+      els.empty.hidden = true;
       state.leftLoaded = true;
+      els.title.textContent = isCompare() ? productLabel(state.product) : `RRFS-MPAS | ${productLabel(state.product)}`;
+      els.viewerTitle.textContent = isCompare() ? 'RRFS-MPAS Product Comparison' : `RRFS-MPAS ${productLabel(state.product)}`;
+      els.meta.textContent = `${DOMAIN_LABELS[selectedDomain].toUpperCase()} · ${fmtHour(selectedHour)}`;
+      els.caption.textContent = `${selectedCycle}Z run · Valid ${utcTime(manifest.valid_time_utc)} · ${DOMAIN_LABELS[selectedDomain]}`;
+      els.fullLink.href = leftUrl;
+      els.fullLink.hidden = false;
+      if (rightUrl) {
+        state.rightImageUrl = rightUrl;
+        els.rightImage.alt = `${productLabel(state.rightProduct)} for ${DOMAIN_LABELS[selectedDomain]}, valid ${utcTime(manifest.valid_time_utc)}`;
+        els.rightImage.src = rightUrl;
+        els.rightImage.hidden = false;
+        els.rightEmpty.hidden = true;
+        els.rightTitle.textContent = productLabel(state.rightProduct);
+        els.rightFullLink.href = rightUrl;
+        els.rightFullLink.hidden = false;
+        state.rightLoaded = true;
+      } else {
+        state.rightLoaded = false;
+        state.rightImageUrl = null;
+        els.rightImage.hidden = true;
+        els.rightFullLink.hidden = true;
+      }
       updateSaveButton();
-    };
-    els.image.onerror = () => {
-      if (state.imageUrl !== url) return;
-      empty('PNG could not be loaded', 'Confirm the S3 object exists and can be read over HTTPS.');
-      status('S3 image could not be loaded: ' + path, 'error');
-    };
-    els.fullLink.href = url;
-    els.fullLink.hidden = false;
-    els.empty.hidden = false;
-    els.emptyTitle.textContent = 'Loading forecast image…';
-    els.emptyDetails.textContent = 'The forecast image is being fetched from AWS S3.';
-    els.image.src = url;
-    if (isCompare()) {
-      showRightProduct(available, manifest);
-    } else {
-      emptyRight('Awaiting second product', 'Switch to Compare Products to show a second panel.');
+      // Do not block rendering or playback while warming the next hour.
+      void prefetchNextHour(selectedCycle, selectedHour, selectedDomain, selectedProducts);
+      return true;
+    } catch (err) {
+      if (serial !== state.serial) return false;
+      if (els.image.hidden) empty('PNG could not be loaded', 'Confirm the S3 object is publicly readable.');
+      status('S3 image could not be loaded: ' + err.message, 'error');
+      return false;
     }
   }
-  function showRightProduct(available, manifest) {
-    const path = available[state.rightProduct];
-    els.rightTitle.textContent = productLabel(state.rightProduct);
-    if (!path || !/^[0-9]{10}\/(lbf|regional|central_plains)\/[\w.-]+\.png$/.test(path) ||
-        !path.startsWith(state.cycle + '/' + state.domain + '/') || path.includes('..')) {
-      emptyRight('Second map unavailable', 'That product is not available for this domain and forecast hour.');
-      return;
-    }
-    const url = dataUrl(path) + '?v=' + state.cacheToken;
-    state.rightImageUrl = url;
-    state.rightLoaded = false;
-    updateSaveButton();
-    els.rightImage.hidden = true;
-    els.rightImage.alt = `${productLabel(state.rightProduct)} for ${DOMAIN_LABELS[state.domain]}, valid ${utcTime(manifest.valid_time_utc)}`;
-    els.rightEmpty.hidden = false;
-    els.rightEmptyTitle.textContent = 'Loading second product…';
-    els.rightEmptyDetails.textContent = 'The comparison image is loading from AWS S3.';
-    els.rightImage.onload = () => {
-      if (state.rightImageUrl !== url) return;
-      state.rightLoaded = true;
-      els.rightImage.hidden = false;
-      els.rightEmpty.hidden = true;
-      updateSaveButton();
-    };
-    els.rightImage.onerror = () => {
-      if (state.rightImageUrl !== url) return;
-      emptyRight('Second map failed to load', 'Check the published PNG and its HTTPS permissions.');
-    };
-    els.rightFullLink.href = url;
-    els.rightFullLink.hidden = false;
-    els.rightImage.src = url;
-  }
+
   function chooseHour(hour) {
-    if (!state.entries.some(e => e.cycle === state.cycle && e.forecast_hour === hour)) return;
+    if (!state.entries.some(e => e.cycle === state.cycle && e.forecast_hour === hour)) return Promise.resolve(false);
     state.hour = hour;
-    loadCurrent();
+    return loadCurrent();
   }
+
   function startAnimation() {
     const entries = entriesForCycle(state.cycle);
     if (entries.length < 2) return;
     const hours = entries.map(e => e.forecast_hour);
     stopAnimation();
+    state.playing = true;
+    const generation = state.playGeneration;
     els.play.textContent = 'Ⅱ Pause';
     els.play.setAttribute('aria-pressed', 'true');
-    state.timer = window.setInterval(() => {
-      const currentIndex = hours.indexOf(state.hour);
-      chooseHour(hours[(currentIndex + 1 + hours.length) % hours.length]);
-    }, FRAME_DELAY_MS);
+    const advance = async () => {
+      if (!state.playing || generation !== state.playGeneration) return;
+      state.timer = null;
+      const idx = hours.indexOf(state.hour);
+      const nextHour = hours[(idx + 1 + hours.length) % hours.length];
+      // Never outrun S3: wait for the next PNG before scheduling another tick.
+      const loaded = await chooseHour(nextHour);
+      if (!state.playing || generation !== state.playGeneration) return;
+      if (!loaded) {
+        stopAnimation();
+        status(`Playback paused: ${fmtHour(nextHour)} could not be loaded.`, 'warning');
+        return;
+      }
+      state.timer = window.setTimeout(advance, FRAME_DELAY_MS);
+    };
+    state.timer = window.setTimeout(advance, FRAME_DELAY_MS);
   }
 
   setCompareView();
   els.view.addEventListener('change', () => {
     state.view = els.view.value;
     setCompareView();
-    if (state.manifest) showManifest(state.manifest);
+    ++state.serial;
+    if (state.manifest) void showManifest(state.manifest);
     syncAddress();
   });
   els.rightProduct.addEventListener('change', () => {
     state.rightProduct = els.rightProduct.value;
-    if (state.manifest) showManifest(state.manifest);
+    ++state.serial;
+    if (state.manifest) void showManifest(state.manifest);
     syncAddress();
   });
   els.domain.value = state.domain;
   els.domain.addEventListener('change', () => {
     state.domain = els.domain.value;
-    if (state.manifest) { showManifest(state.manifest); syncAddress(); }
+    ++state.serial;
+    if (state.manifest) { void showManifest(state.manifest); syncAddress(); }
   });
   els.product.addEventListener('change', () => {
     state.product = els.product.value;
-    if (state.manifest) { showManifest(state.manifest); syncAddress(); }
+    ++state.serial;
+    if (state.manifest) { void showManifest(state.manifest); syncAddress(); }
   });
   els.run.addEventListener('change', () => {
     stopAnimation();
@@ -469,7 +560,7 @@
     const nearest = hours.reduce((a,b) => Math.abs(b-wanted) < Math.abs(a-wanted) ? b : a);
     chooseHour(nearest);
   });
-  els.play.addEventListener('click', () => state.timer ? stopAnimation() : startAnimation());
+  els.play.addEventListener('click', () => state.playing ? stopAnimation() : startAnimation());
   els.latest.addEventListener('click', () => {
     stopAnimation();
     const latest = state.entries[0];
