@@ -1,4 +1,4 @@
-/* Winter CAMs â€” aligned with the original LBF CAMs viewer visual styling */
+/* Winter CAMs — aligned with the original LBF CAMs viewer visual styling */
 :root {color-scheme: dark;--bg:#080808;--dark:#111;--panel:#1b1b1b;--line:#333;--accent:#6ea8ff;--blue:#2b7cff;--text:#fff}
 * {box-sizing:border-box}
 html {background:var(--bg);min-height:100%}
@@ -134,15 +134,20 @@ body.four-panel-mode .tiles {
 body.four-panel-mode .tiles .frame {flex:0 0 auto}
 body.four-panel-mode .footer {display:none}
 
+/* Keep each column close to the actual image width instead of stretching
+   the 2-column grid across the entire monitor. The images still scale to
+   the available viewport height; this only removes the empty center gap. */
 .plot-wrap.four {
   display:grid;
   grid-template-columns:repeat(2,minmax(0,1fr));
   grid-template-rows:repeat(2,minmax(0,1fr));
+  width:min(100%, calc((var(--four-fit-height,540px) - 74px) * 1.70 + 20px));
+  margin-inline:auto;
   height:var(--four-fit-height,540px);
   max-height:var(--four-fit-height,540px);
   min-height:0;
-  gap:7px 14px;
-  padding:5px 12px 7px;
+  gap:7px 12px;
+  padding:5px 4px 7px;
   justify-items:stretch;
   align-items:stretch;
   overflow:hidden;
