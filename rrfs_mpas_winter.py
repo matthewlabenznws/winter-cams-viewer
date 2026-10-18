@@ -16,12 +16,14 @@ Products: 1-km/composite reflectivity + P-type, cumulative 0–F QPF, 2-m temper
 925/850/700-mb shaded temperature + black heights/barbs (no isotherms),
 wind speed + heights/barbs,
 combined temperature advection/frontogenesis (no advection-only map),
-optional native accumulated snowfall and
-snow-water equivalent, LBF city labels and city-value annotations.
+optional native accumulated snowfall, a separate 10:1 SWE-based snowfall
+estimate, and snow-water equivalent; LBF city labels and values.
 
-The GRIB must actually contain ASNOW/WEASD 0-F accumulations to plot the
-corresponding snow products. No snowfall amounts are inferred from current
-precipitation type, QPF or snow depth. Site outputs are staged LOCALLY only;
+The GRIB must contain ASNOW/WEASD 0-F accumulations to plot the corresponding
+snow products. Native ASNOW is unchanged. The separate 10:1 product multiplies
+WEASD liquid-equivalent depth by 10; it is a simplified SWE-based estimate,
+not a snowfall forecast derived from all-precipitation QPF. Snowpack SWE
+can also be affected by melting and compaction. Site outputs are staged LOCALLY only;
 this test script does not publish to AWS S3 or modify your existing site.
 """
 
@@ -113,8 +115,9 @@ DO_PTYPE = True
 DO_PTYPE_REF1KM = True
 DO_PTYPE_COMPOSITE = True
 DO_QPF = True
-DO_ACCUM_SNOWFALL = True  # only true 0-F snowfall amounts (ASNOW)
-DO_SNOW_WATER_EQUIV = True # only true 0-F snow-water equiv (WEASD)
+DO_ACCUM_SNOWFALL = True  # native 0-F snowfall (ASNOW)
+DO_SNOWFALL_10TO1 = True  # separate 10:1 estimate based on 0-F WEASD
+DO_SNOW_WATER_EQUIV = True # 0-F snow-water equiv (WEASD)
 DO_2M_TEMP = True
 DO_LEVEL_TEMP = True
 DO_LEVEL_WSPD = True
@@ -172,7 +175,7 @@ MAP_CREDIT = 'Plot created by: Matthew Labenz'
 SHOW_CITY_LABELS = True     # draw cities only on the LBF domain during testing
 SHOW_LBF_CITY_VALUES = True
 CITY_VALUE_LAYERS = {
-    'qpf': True, 't2m': True, 'asnow': True, 'weasd': True,
+    'qpf': True, 't2m': True, 'asnow': True, 'snow10to1': True, 'weasd': True,
     'pressure_temp': True, 'pressure_wind': False,
 }
 CITY_VALUE_OFFSET_DEG = 0.095     # position value a little closer to city name
@@ -716,17 +719,29 @@ def _qpf_tick_label(value):
     return f'{value:.1f}'
 QPF_TICK_LABELS = [_qpf_tick_label(value) for value in QPF_TICKS]
 
-# Temporary snowfall palette until you choose the final winter colors.
-# Unlike QPF, this is physical snowfall accumulation in inches from ASNOW.
-SNOWFALL_BOUNDS = np.array([0,.1,.25,.5,1,2,3,4,6,8,12,18,24,36,48,60], float)
+# Accumulated snowfall (native ASNOW, inches) — user-specified palette.
+# Native model snowfall is not computed using a hard-coded 10:1 ratio.
+# Each color applies to [bound[i], bound[i+1]) in inches.
+SNOWFALL_BOUNDS = np.array([
+    0, 0.1, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5,
+    5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 11, 12,
+    13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+    25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+    37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48
+], dtype=float)
 SNOWFALL_COLORS = [
-    '#ffffff','#e9f7ff','#cde8f8','#a7d8f3','#77bce8',
-    '#4c9dd5','#297cbb','#22569a','#4c4bb1','#744db7',
-    '#995dc6','#bb79d9','#d795ec','#efb2f2','#f6d8fb'
-]
-SNOWFALL_CMAP = colors.ListedColormap(SNOWFALL_COLORS, name='snowfall_temporary')
+    '#ffffff', '#dadbdb', '#959596', '#6e6e6e', '#505050', '#a0d2fa', '#84b8f9', '#63a3f3', '#5495f3', '#4581ef',
+    '#3d6ce9', '#3462d1', '#2d58c2', '#40008e', '#4d028d', '#59048c', '#66068a', '#810c88', '#9c1484', '#c21c81',
+    '#ea247d', '#ec2b86', '#f0469c', '#f564af', '#f773b7', '#f488c3', '#ef90c7', '#e897cb', '#e39fcd', '#d6aed5',
+    '#d0b5d8', '#c4c7e0', '#b9d6e8', '#b2e2ee', '#aaeef2', '#a2faf8', '#9ff2f0', '#8adad8', '#7cbcc4', '#84b8ca',
+    '#88b6cc', '#8bb2ce', '#8fb0d0', '#92aed2', '#96acd4', '#99a8d8', '#9ca6da', '#a0a4dc', '#a5a3de', '#a99fe0',
+    '#ac9de4', '#b09be6', '#b399e8', '#b795e9', '#bb93eb', '#be91ef', '#c28ff1', '#c78cf3', '#cf88f7'
+ ]
+assert len(SNOWFALL_COLORS) == len(SNOWFALL_BOUNDS) - 1, 'Snowfall bins mismatch'
+SNOWFALL_CMAP = colors.ListedColormap(SNOWFALL_COLORS, name='snowfall_bins')
 SNOWFALL_NORM = colors.BoundaryNorm(SNOWFALL_BOUNDS, SNOWFALL_CMAP.N, clip=True)
-SNOWFALL_TICKS = [0,.5,1,2,3,4,6,8,12,18,24,36,48,60]
+# Label key values rather than every one-inch boundary on the figure.
+SNOWFALL_TICKS = [0, .1, .5, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 35, 40, 45, 48]
 
 
 def _unpack_map_shapefile_archive(archive_path):
@@ -1110,7 +1125,8 @@ def finish(fig, ax, fname, label=None, cf=None):
             cb.ax.xaxis.set_ticks_position('bottom')
             cb.ax.tick_params(axis='x', which='both', length=0, width=0,
                               labelsize=8, pad=3)
-        elif label == 'Accumulated Snowfall (inches)':
+        elif label in ('Accumulated Snowfall (inches)',
+                       '10:1 Snowfall Estimate (inches)'):
             apply_colorbar_ticks(cb, SNOWFALL_TICKS, fontsize=8)
     # Watermark INSIDE the geographic plot, not in the white outer margin.
     ax.text(.995,.012,'RRFS-MPAS GSL EXPERIMENTAL · evaluation only',
@@ -1473,6 +1489,21 @@ def add_lbf_city_values(ax, lat, lon, values, layer, fmt):
 def inches_text(v):
     return f'{v:.2f}"' if v >= .005 else '0.00"'
 
+
+def snowfall_inches_text(v):
+    """Snowfall city labels: nearest tenth (native and 10:1)."""
+    return f'{max(float(v), 0.0):.1f}"'
+
+
+def snowfall_10to1_from_weasd(weasd_kg_m2):
+    """Convert model WEASD (kg/m2 ~= mm water) to inches at a fixed 10:1.
+
+    This is a SWE-based 10:1 snow-depth estimate, NOT all-QPF times ten.
+    WEASD may represent snow water on the ground rather than total snowfall,
+    so pre-existing snowpack, melting and compaction can influence it.
+    """
+    return np.maximum(np.asarray(weasd_kg_m2, dtype=float), 0.0) / 25.4 * 10.0
+
 def plot_qpf(lat,lon,fields,cycle_id):
     if 'qpf' not in fields:
         print('Skipping QPF: no complete 0-F accumulation in GRIB');return None
@@ -1502,9 +1533,33 @@ def plot_accumulated_snowfall(lat,lon,fields,cycle_id):
     cf=ax.contourf(x,y,shade_at_palette_limits(z,SNOWFALL_BOUNDS),
                    levels=SNOWFALL_BOUNDS,cmap=SNOWFALL_CMAP,
                    norm=SNOWFALL_NORM,transform=PLATE,zorder=2)
-    add_lbf_city_values(ax,lat,lon,snow_inches,'asnow',inches_text)
+    add_lbf_city_values(ax,lat,lon,snow_inches,'asnow',snowfall_inches_text)
     filename=f'rrfs_mpas_asnow_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'Accumulated Snowfall (inches)',cf)
+    return filename
+
+
+def plot_snowfall_10to1(lat,lon,fields,cycle_id):
+    """Plot optional 10:1 snow estimate based on cumulative WEASD, not QPF.
+
+    A 10:1 conversion of snow-water equivalent does NOT account for the
+    evolution of the actual snow ratio. Depending on the model's WEASD
+    definition, it may describe snowpack equivalent, not total newly fallen
+    snowfall. Keep this product separate from native ASNOW.
+    """
+    if 'weasd' not in fields:
+        print('Skipping 10:1 snowfall estimate: cumulative WEASD not found')
+        return None
+    snow_inches = snowfall_10to1_from_weasd(fields['weasd'])
+    fig,ax = new_map(f'10:1 Snowfall Estimate (WEASD; 0–F{FORECAST_HOUR:03d})',
+                     title_info(cycle_id))
+    x,y,z = mesh_values(lon,lat,snow_inches)
+    cf = ax.contourf(x,y,shade_at_palette_limits(z,SNOWFALL_BOUNDS),
+                     levels=SNOWFALL_BOUNDS,cmap=SNOWFALL_CMAP,
+                     norm=SNOWFALL_NORM,transform=PLATE,zorder=2)
+    add_lbf_city_values(ax,lat,lon,snow_inches,'snow10to1',snowfall_inches_text)
+    filename = f'rrfs_mpas_snow10to1_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    finish(fig,ax,filename,'10:1 Snowfall Estimate (inches)',cf)
     return filename
 
 
@@ -1814,6 +1869,8 @@ def run():
             add(plot_qpf(lat,lon,fields,cycle_id))
         if DO_ACCUM_SNOWFALL:
             add(plot_accumulated_snowfall(lat,lon,fields,cycle_id))
+        if DO_SNOWFALL_10TO1:
+            add(plot_snowfall_10to1(lat,lon,fields,cycle_id))
         if DO_SNOW_WATER_EQUIV:
             add(plot_snow_water_equivalent(lat,lon,fields,cycle_id))
         if DO_2M_TEMP:
@@ -1856,6 +1913,9 @@ def run():
     payload['site_index_path'] = stage_site_run(payload)
     return payload
 
+
+if __name__ == '__main__':
+    run()
 
 if __name__ == '__main__':
     run()
