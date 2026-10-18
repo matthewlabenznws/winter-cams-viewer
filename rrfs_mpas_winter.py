@@ -14,8 +14,8 @@ before publishing maps. No substitute CWA geography is fabricated.
 
 Products: 1-km/composite reflectivity + P-type, cumulative 0–F QPF, 2-m temperature,
 925/850/700-mb shaded temperature + black heights/barbs (no isotherms),
-wind speed + heights/barbs,
-combined temperature advection/frontogenesis (no advection-only map),
+wind speed + heights/barbs, native surface gusts, 2-m RH and dewpoint,
+10-m sustained winds/barbs, combined temperature advection/frontogenesis (no advection-only map),
 optional native accumulated snowfall, a separate 10:1 SWE-based snowfall
 estimate, and snow-water equivalent; LBF city labels and values.
 
@@ -119,6 +119,11 @@ DO_ACCUM_SNOWFALL = True  # native 0-F snowfall (ASNOW)
 DO_SNOWFALL_10TO1 = True  # separate 10:1 estimate based on 0-F WEASD
 DO_SNOW_WATER_EQUIV = True # 0-F snow-water equiv (WEASD)
 DO_2M_TEMP = True
+# Additional native RRFS-MPAS surface diagnostics.
+DO_10M_GUST = True          # instantaneous GUST, converted to mph
+DO_2M_RH = True             # native 2-m RH (%)
+DO_2M_DEWPOINT = True       # native 2-m dewpoint (K -> F)
+DO_10M_WSPD = True          # 10-m U/V vector magnitude (mph) + barbs
 DO_LEVEL_TEMP = True
 DO_LEVEL_WSPD = True
 # Publish only the combined temperature-advection shading + green
@@ -177,6 +182,7 @@ SHOW_LBF_CITY_VALUES = True
 CITY_VALUE_LAYERS = {
     'qpf': True, 't2m': True, 'asnow': True, 'snow10to1': True, 'weasd': True,
     'pressure_temp': True, 'pressure_wind': False,
+    'gust10m': True, 'rh2m': True, 'd2m': True, 'wspd10m': True,
 }
 CITY_VALUE_OFFSET_DEG = 0.095     # position value a little closer to city name
 CITY_MAX_SAMPLE_DISTANCE_KM = 20.0
@@ -185,12 +191,14 @@ CITY_MAX_SAMPLE_DISTANCE_KM = 20.0
 SHOW_HL_CENTERS = True      # label actual MSLP maxima/minima when detectable
 MAX_HL_PER_TYPE = 2            # fewer synoptic-scale centers per domain
 HL_MIN_PROMINENCE_HPA = 2.5  # increase for stricter H/L placement
+HL_LOW_MAX_PRESSURE_HPA = 1009.0  # label L only if its actual MSLP <= 1009 mb
 HL_MIN_SPACING_KM = 275      # reject closely clustered centers
 # Reference RRFS one-panel style: red H/L letter and pressure value, one black halo.
 HL_BLACK_OUTLINE_PT = 3.2    # a single solid black stroke (no white inner outline)
 HL_LETTER_FONT_SIZE = 22
 HL_PRESSURE_FONT_SIZE = 13
-HL_PRESSURE_LAT_OFFSET = 0.18
+HL_PRESSURE_LAT_OFFSET = 0.18  # spacing for high centers
+HL_LOW_PRESSURE_LAT_OFFSET = 0.10  # bring L pressure value closer to the letter
 MSLP_LABEL_INTERVAL_HPA = 4 # draw every 2, label every 4 hPa
 THICKNESS_LABEL_INTERVAL_DAM = 12  # draw every 6, label every 12 dam
 CONTOUR_LABEL_SPACING = 10
@@ -301,6 +309,13 @@ def field_definitions(fhr: int):
         'weasd': lambda k: k[:3] == (0, 1, 13) and k[3] == 'surface'
                     and k[5] == 'accum' and k[6] == f'0-{fhr}',
         't2m':    lambda k: k[:3] == (0, 0, 0) and k[3:5] == ('heightAboveGround', 2),
+        # Native RRFS-MPAS surface fields confirmed in the F001/F006/F024
+        # GSL inventory (GRIB2 identifiers, not ecCodes short names).
+        'gust10m': lambda k: k[:3] == (0, 2, 22) and k[3] == 'surface' and k[5] == 'instant',
+        'rh2m': lambda k: k[:3] == (0, 1, 1) and k[3:5] == ('heightAboveGround', 2) and k[5] == 'instant',
+        'd2m': lambda k: k[:3] == (0, 0, 6) and k[3:5] == ('heightAboveGround', 2) and k[5] == 'instant',
+        'u10': lambda k: k[:3] == (0, 2, 2) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
+        'v10': lambda k: k[:3] == (0, 2, 3) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
         'mslp':   lambda k: k[:3] == (0, 3, 198) and k[3] == 'meanSea' and k[5] == 'instant',
         'psfc':   lambda k: k[:3] == (0, 3, 0) and k[3] == 'surface' and k[5] == 'instant',
         'gh500':  lambda k: k[:3] == (0, 3, 5) and k[3:5] == ('isobaricInhPa', 500),
@@ -357,7 +372,8 @@ def read_selected_fields(grib_path: Path, fhr: int):
                     missing_value = float(meta(gid, 'missingValue', 9.999e20))
                     arr[~np.isfinite(arr) | np.isclose(arr, missing_value, rtol=0, atol=0)] = np.nan
                     fields[label] = arr
-                    if label[0] in ('u', 'v') and label[1:].isdigit():
+                    if ((label[0] in ('u', 'v') and label[1:].isdigit())
+                            or label in ('u10','v10')):
                         # ecCodes: 1=grid-relative, 0=earth-relative.
                         # Do not default missing metadata to 0 (unsafe).
                         uv_flags[label] = int(meta(gid, 'uvRelativeToGrid', -1))
@@ -414,15 +430,15 @@ def rotate_winds_to_earth(lat, lon, fields, uv_flags, wind_grid_meta):
     earth-relative U/V. No interpolation or regridding is performed.
     """
     if not uv_flags:
-        print('No pressure-level wind vectors to rotate.')
+        print('No 10-m or pressure-level wind vectors to rotate.')
         return fields
 
-    # Confirm each pressure-level pair has consistent flags.
-    for lev in LEVELS_HPA:
-        uk, vk = f'u{lev}', f'v{lev}'
+    wind_pairs = [(f'u{lev}', f'v{lev}') for lev in LEVELS_HPA]
+    wind_pairs.insert(0, ('u10', 'v10'))
+    for uk, vk in wind_pairs:
         if uk in fields and vk in fields:
             if uk not in uv_flags or vk not in uv_flags or uv_flags[uk] != uv_flags[vk]:
-                raise ValueError(f'{lev}-mb U and V wind orientation metadata disagree')
+                raise ValueError(f'{uk}/{vk} wind orientation metadata disagree')
 
     flags = set(uv_flags.values())
     if not flags <= {0, 1}:
@@ -430,8 +446,8 @@ def rotate_winds_to_earth(lat, lon, fields, uv_flags, wind_grid_meta):
     if flags == {0}:
         print('GRIB winds are already earth-relative; no rotation necessary.')
         return fields
-    if flags != {1}:
-        raise ValueError('Mixed grid-relative and earth-relative wind components')
+    # Mixed 0/1 flags across levels are valid when each U/V pair agrees.
+    # Rotate ONLY pairs flagged as grid-relative.
 
     if not wind_grid_meta:
         raise ValueError('Missing GRIB grid definition for wind rotation')
@@ -478,9 +494,11 @@ def rotate_winds_to_earth(lat, lon, fields, uv_flags, wind_grid_meta):
     print(f'  Scan metadata: iScansNegatively={int(i_neg)}, '
           f'jScansPositively={int(j_pos)}')
     rotated = dict(fields)
-    for lev in LEVELS_HPA:
-        uk, vk = f'u{lev}', f'v{lev}'
+    for uk, vk in wind_pairs:
         if uk not in fields or vk not in fields:
+            continue
+        if uv_flags[uk] == 0:
+            print(f'  {uk}/{vk} already earth-relative; kept unchanged')
             continue
         grid_u = np.asarray(fields[uk], dtype=np.float64)
         grid_v = np.asarray(fields[vk], dtype=np.float64)
@@ -488,7 +506,7 @@ def rotate_winds_to_earth(lat, lon, fields, uv_flags, wind_grid_meta):
         north_v = grid_u * ei_n + grid_v * ej_n
         rotated[uk] = east_u.astype(np.float32)
         rotated[vk] = north_v.astype(np.float32)
-        print(f'  {lev} mb U/V rotated successfully')
+        print(f'  {uk}/{vk} rotated successfully')
     return rotated
 
 
@@ -680,6 +698,28 @@ WSPD_CMAP = colors.ListedColormap(WSPD_COLORS, name='midlevelwinds_bins')
 WSPD_NORM = colors.BoundaryNorm(WSPD_BOUNDS, WSPD_CMAP.N, clip=True)
 WSPD_TICKS = np.arange(20, 82, 5)
 HEIGHT_CONTOUR_INTERVALS_DAM = {925: 3, 850: 3, 700: 3}  # 3 dam = 30 m
+
+# Surface wind products (mph). Use the established wind-speed palette, now
+# interpreted as mph with the familiar white lowest bin. Values under 20 mph
+# remain white; 20-81 mph shading uses 1-mph bins. Square-ended colorbar.
+SFC_WIND_MPH_BOUNDS = WSPD_BOUNDS.copy()
+SFC_WIND_MPH_CMAP = colors.ListedColormap(WSPD_COLORS, name='surface_wind_mph')
+SFC_WIND_MPH_NORM = colors.BoundaryNorm(SFC_WIND_MPH_BOUNDS, SFC_WIND_MPH_CMAP.N, clip=True)
+SFC_WIND_MPH_TICKS = np.arange(20, 82, 5)
+
+# 2-m RH in 5%-wide bins, dry oranges -> neutral -> moist blue/teal/green.
+# Colors are initial defaults; the user can replace them with a custom palette.
+RH2M_BOUNDS = np.arange(0., 101., 5.)
+RH2M_COLORS = [
+    '#a64923', '#c8662a', '#df8b37', '#eda845', '#f2c35d',
+    '#f4d97b', '#f5e8a2', '#f3f0c9', '#edf4ee', '#d6edf4',
+    '#bfe5ee', '#a1dae5', '#80cbdc', '#5bb7cf', '#399fbd',
+    '#218ea8', '#1c7e95', '#17747f', '#14695f', '#11583e'
+]
+assert len(RH2M_COLORS) == len(RH2M_BOUNDS) - 1, 'RH bins mismatch'
+RH2M_CMAP = colors.ListedColormap(RH2M_COLORS, name='two_meter_rh')
+RH2M_NORM = colors.BoundaryNorm(RH2M_BOUNDS, RH2M_CMAP.N, clip=True)
+RH2M_TICKS = np.arange(0, 101, 10)
 
 
 # EXACT user-supplied QPF palette: 52 discrete colors and 53 boundaries.
@@ -1119,6 +1159,12 @@ def finish(fig, ax, fname, label=None, cf=None):
             apply_colorbar_ticks(cb, PRESSURE_TEMP_TICKS, fontsize=7)
         elif label and 'Wind Speed (kt)' in label:
             apply_colorbar_ticks(cb, WSPD_TICKS, fontsize=8)
+        elif label in ('10-m Wind Gust (mph)', '10-m Wind Speed (mph)'):
+            apply_colorbar_ticks(cb, SFC_WIND_MPH_TICKS, fontsize=8)
+        elif label == '2-m Relative Humidity (%)':
+            apply_colorbar_ticks(cb, RH2M_TICKS, fontsize=8)
+        elif label == '2-m Dewpoint (°F)':
+            apply_colorbar_ticks(cb, SFC_TEMP_TICKS, fontsize=8)
         elif label in ('Total Precipitation (inches)', 'Snow-water equivalent (inches)'):
             cb.set_ticks(QPF_TICKS)
             cb.set_ticklabels(QPF_TICK_LABELS)
@@ -1231,7 +1277,8 @@ def label_pressure_centers(ax, lat, lon, pressure_hpa):
 
     Find 2-D extrema after ~30-km smoothing. Require at least a 2.5-hPa
     departure from the ~250-km background, then apply 275-km separation.
-    This is deliberately less aggressive than the earlier 0.8-hPa test.
+    Only plot lows with smoothed MSLP <= HL_LOW_MAX_PRESSURE_HPA; high
+    center criteria remain unchanged.
     """
     if not SHOW_HL_CENTERS:
         return
@@ -1261,8 +1308,10 @@ def label_pressure_centers(ax, lat, lon, pressure_hpa):
         ('L',np.isclose(z,low,atol=.035),background-z),
         ('H',np.isclose(z,high,atol=.035),z-background),
     ):
-        pts=np.argwhere(valid & is_extreme &
-                        (prominence>=HL_MIN_PROMINENCE_HPA))
+        candidates = valid & is_extreme & (prominence >= HL_MIN_PROMINENCE_HPA)
+        if mark == 'L':
+            candidates &= z <= HL_LOW_MAX_PRESSURE_HPA
+        pts = np.argwhere(candidates)
         if not len(pts):
             continue
         pts=sorted(pts,key=lambda ji:float(prominence[tuple(ji)]),reverse=True)
@@ -1288,7 +1337,7 @@ def label_pressure_centers(ax, lat, lon, pressure_hpa):
                     fontsize=HL_LETTER_FONT_SIZE,weight='bold',
                     ha='center',va='center',transform=PLATE,zorder=46,
                     path_effects=outline)
-            ax.text(lo,la-HL_PRESSURE_LAT_OFFSET,f'{pres:.0f}',
+            ax.text(lo,la-(HL_LOW_PRESSURE_LAT_OFFSET if mark == 'L' else HL_PRESSURE_LAT_OFFSET),f'{pres:.0f}',
                     color=text_color,fontsize=HL_PRESSURE_FONT_SIZE,
                     weight='bold',ha='center',va='top',transform=PLATE,zorder=46,
                     path_effects=outline)
@@ -1719,6 +1768,77 @@ def plot_2m_temperature(lat, lon, fields, cycle_id):
     return filename
 
 
+
+def plot_10m_gust(lat, lon, fields, cycle_id):
+    """Native instantaneous GUST at surface in mph; NOT hourly max 10-m wind."""
+    if 'gust10m' not in fields:
+        print('Skipping surface gusts: GRIB 0/2/22 GUST is missing')
+        return None
+    gust_mph = np.maximum(np.asarray(fields['gust10m'],float), 0.) * 2.2369362921
+    fig,ax = new_map('RRFS-MPAS | 10-m Wind Gusts', title_info(cycle_id))
+    x,y,z = mesh_values(lon,lat,smooth(gust_mph,1.0))
+    cf = ax.contourf(x,y,shade_at_palette_limits(z,SFC_WIND_MPH_BOUNDS),
+                     levels=SFC_WIND_MPH_BOUNDS,cmap=SFC_WIND_MPH_CMAP,
+                     norm=SFC_WIND_MPH_NORM,transform=PLATE,zorder=2)
+    if 'u10' in fields and 'v10' in fields:
+        wind_barbs(ax,lon,lat,{'u':np.asarray(fields['u10'],float),
+                               'v':np.asarray(fields['v10'],float)})
+    add_lbf_city_values(ax,lat,lon,gust_mph,'gust10m',lambda v:f'{v:.0f} mph')
+    filename = f'rrfs_mpas_gust10m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    finish(fig,ax,filename,'10-m Wind Gust (mph)',cf)
+    return filename
+
+def plot_2m_rh(lat, lon, fields, cycle_id):
+    """Native instantaneous 2-m RH; no humidity reconstruction needed."""
+    if 'rh2m' not in fields:
+        print('Skipping 2-m relative humidity: GRIB 0/1/1 field missing')
+        return None
+    rh = np.clip(np.asarray(fields['rh2m'],float),0.,100.)
+    fig,ax = new_map('RRFS-MPAS | 2-m Relative Humidity',title_info(cycle_id))
+    x,y,z = mesh_values(lon,lat,smooth(rh,1.0))
+    cf = ax.contourf(x,y,shade_at_palette_limits(z,RH2M_BOUNDS),
+                     levels=RH2M_BOUNDS,cmap=RH2M_CMAP,norm=RH2M_NORM,
+                     transform=PLATE,zorder=2)
+    add_lbf_city_values(ax,lat,lon,rh,'rh2m',lambda v:f'{v:.0f}%')
+    filename = f'rrfs_mpas_rh2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    finish(fig,ax,filename,'2-m Relative Humidity (%)',cf)
+    return filename
+
+def plot_2m_dewpoint(lat, lon, fields, cycle_id):
+    """Native 2-m dewpoint Kelvin to degrees Fahrenheit; SPCOA T2m palette."""
+    if 'd2m' not in fields:
+        print('Skipping 2-m dewpoint: GRIB 0/0/6 field missing')
+        return None
+    dew_f = (np.asarray(fields['d2m'],float) - 273.15) * 1.8 + 32.
+    fig,ax = new_map('RRFS-MPAS | 2-m Dewpoint',title_info(cycle_id))
+    x,y,z = mesh_values(lon,lat,smooth(dew_f,1.0))
+    cf = ax.contourf(x,y,shade_at_palette_limits(z,SFC_TEMP_BOUNDS),
+                     levels=SFC_TEMP_BOUNDS,cmap=SFC_TEMP_CMAP,norm=SFC_TEMP_NORM,
+                     transform=PLATE,zorder=2)
+    add_lbf_city_values(ax,lat,lon,dew_f,'d2m',lambda v:f'{v:.0f}°F')
+    filename = f'rrfs_mpas_d2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    finish(fig,ax,filename,'2-m Dewpoint (°F)',cf)
+    return filename
+
+def plot_10m_windspeed(lat, lon, fields, cycle_id):
+    """Magnitude of earth-relative 10-m U/V winds, mph, with kt barbs."""
+    if 'u10' not in fields or 'v10' not in fields:
+        print('Skipping 10-m wind speed: missing 10-m U/V pair')
+        return None
+    u=np.asarray(fields['u10'],float)
+    v=np.asarray(fields['v10'],float)
+    wind_mph=np.hypot(u,v)*2.2369362921
+    fig,ax = new_map('RRFS-MPAS | 10-m Wind Speed and Direction',title_info(cycle_id))
+    x,y,z=mesh_values(lon,lat,smooth(wind_mph,1.0))
+    cf=ax.contourf(x,y,shade_at_palette_limits(z,SFC_WIND_MPH_BOUNDS),
+                   levels=SFC_WIND_MPH_BOUNDS,cmap=SFC_WIND_MPH_CMAP,
+                   norm=SFC_WIND_MPH_NORM,transform=PLATE,zorder=2)
+    wind_barbs(ax,lon,lat,{'u':u,'v':v})  # barb values converted to knots internally
+    add_lbf_city_values(ax,lat,lon,wind_mph,'wspd10m',lambda val:f'{val:.0f} mph')
+    filename=f'rrfs_mpas_wspd10m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    finish(fig,ax,filename,'10-m Wind Speed (mph)',cf)
+    return filename
+
 def plot_level_temperature(lat, lon, fields, lev, cycle_id):
     tkey, ukey, vkey = f't{lev}', f'u{lev}', f'v{lev}'
     missing = [k for k in (tkey, ukey, vkey) if k not in fields]
@@ -1875,6 +1995,14 @@ def run():
             add(plot_snow_water_equivalent(lat,lon,fields,cycle_id))
         if DO_2M_TEMP:
             add(plot_2m_temperature(lat,lon,fields,cycle_id))
+        if DO_10M_GUST:
+            add(plot_10m_gust(lat,lon,fields,cycle_id))
+        if DO_2M_RH:
+            add(plot_2m_rh(lat,lon,fields,cycle_id))
+        if DO_2M_DEWPOINT:
+            add(plot_2m_dewpoint(lat,lon,fields,cycle_id))
+        if DO_10M_WSPD:
+            add(plot_10m_windspeed(lat,lon,fields,cycle_id))
         if DO_LEVEL_TEMP:
             for lev in LEVELS_HPA:
                 add(plot_level_temperature(lat,lon,fields,lev,cycle_id))
@@ -1902,6 +2030,7 @@ def run():
                                'mslp':OVERLAY_THICKNESS_MSLP_ON_PTYPE,
                                'pressure_centers':SHOW_HL_CENTERS,
                                'center_prominence_hpa':HL_MIN_PROMINENCE_HPA,
+                               'low_center_max_mslp_hpa':HL_LOW_MAX_PRESSURE_HPA,
                                'mslp_contour_interval_hpa':MSLP_CONTOUR_INTERVAL_HPA,
                                'thickness_contour_interval_dam':THICKNESS_CONTOUR_INTERVAL_DAM},
              'disclaimer':'Experimental forecast for evaluation; physical QA before publication.'}
@@ -1913,9 +2042,6 @@ def run():
     payload['site_index_path'] = stage_site_run(payload)
     return payload
 
-
-if __name__ == '__main__':
-    run()
 
 if __name__ == '__main__':
     run()
