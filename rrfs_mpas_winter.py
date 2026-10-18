@@ -14,7 +14,8 @@ before publishing maps. No substitute CWA geography is fabricated.
 
 Products: 1-km/composite reflectivity + P-type, cumulative 0–F QPF, 2-m temperature,
 925/850/700-mb shaded temperature + black heights/barbs (no isotherms),
-wind speed + heights/barbs, native surface gusts, 2-m RH and dewpoint,
+wind speed + heights/barbs, shaded 850/700/500-mb relative vorticity
+with geopotential height contours and earth-relative wind barbs; native surface gusts, 2-m RH and dewpoint,
 10-m sustained winds/barbs, combined temperature advection/frontogenesis (no advection-only map),
 optional native accumulated snowfall, a separate 10:1 SWE-based snowfall
 estimate, and snow-water equivalent; LBF city labels and values.
@@ -66,6 +67,9 @@ FTP_EMAIL = os.getenv('GSL_FTP_EMAIL', 'your_email@example.com')
 CYCLE_ID = os.getenv('MPAS_CYCLE', 'AUTO').strip().upper()  # YYYYMMDDHH or AUTO
 FORECAST_HOUR = int(os.getenv('MPAS_FHR', '6'))  # one forecast hour per job
 LEVELS_HPA = (925, 850, 700)
+# Vorticity maps use three levels; do not add 500 mb to the original
+# temperature, wind-speed, or frontogenesis product loops.
+VORTICITY_LEVELS_HPA = (850, 700, 500)
 # These are the exact three geographic extents used in the existing CAMs viewer.
 # Download/decode the MPAS GRIB once; produce matching products for selected domains.
 DOMAINS = {
@@ -126,6 +130,7 @@ DO_2M_DEWPOINT = True       # native 2-m dewpoint (K -> F)
 DO_10M_WSPD = True          # 10-m U/V vector magnitude (mph) + barbs
 DO_LEVEL_TEMP = True
 DO_LEVEL_WSPD = True
+DO_LEVEL_VORTICITY = True  # 850/700/500 mb relative vorticity + heights + barbs
 # Publish only the combined temperature-advection shading + green
 # frontogenesis contours at 925/850/700 mb; skip standalone advection maps.
 DO_ADV = False
@@ -330,6 +335,13 @@ def field_definitions(fhr: int):
             f'u{lev}': lambda k, lev=lev: k[:3] == (0, 2, 2) and k[3:5] == ('isobaricInhPa', lev),
             f'v{lev}': lambda k, lev=lev: k[:3] == (0, 2, 3) and k[3:5] == ('isobaricInhPa', lev),
         })
+    # 850/700 mb U/V already exist in LEVELS_HPA; add 500 mb only for the
+    # 500-mb vorticity calculation. 500-mb heights (gh500) are defined above.
+    for lev in VORTICITY_LEVELS_HPA:
+        defs.setdefault(f'u{lev}', lambda k, lev=lev: k[:3] == (0, 2, 2)
+                        and k[3:5] == ('isobaricInhPa', lev))
+        defs.setdefault(f'v{lev}', lambda k, lev=lev: k[:3] == (0, 2, 3)
+                        and k[3:5] == ('isobaricInhPa', lev))
     return defs
 
 
@@ -433,7 +445,8 @@ def rotate_winds_to_earth(lat, lon, fields, uv_flags, wind_grid_meta):
         print('No 10-m or pressure-level wind vectors to rotate.')
         return fields
 
-    wind_pairs = [(f'u{lev}', f'v{lev}') for lev in LEVELS_HPA]
+    wind_levels = tuple(dict.fromkeys(LEVELS_HPA + VORTICITY_LEVELS_HPA))
+    wind_pairs = [(f'u{lev}', f'v{lev}') for lev in wind_levels]
     wind_pairs.insert(0, ('u10', 'v10'))
     for uk, vk in wind_pairs:
         if uk in fields and vk in fields:
@@ -550,6 +563,36 @@ def smooth(field, sigma):
     numerator = gaussian_filter(np.where(valid, v, 0), sigma=sigma, mode='nearest')
     denominator = gaussian_filter(valid.astype(float), sigma=sigma, mode='nearest')
     return np.divide(numerator, denominator, out=np.full_like(numerator, np.nan), where=denominator>0.95)
+
+
+def calculate_relative_vorticity(lat, lon, fields, lev, grad):
+    """Return 2-D relative vorticity on a pressure surface, in 10^-5 s^-1.
+
+    U and V must first be rotated from RRFS-MPAS GRIB grid-relative winds
+    to true east/north using rotate_winds_to_earth(). Differentiate the
+    (lightly smoothed) earth-relative vectors using the local geographic
+    Jacobian rather than treating native Lambert i/j as east/north.
+
+    zeta = d(v_north)/dx_east - d(u_east)/dy_north
+    Relative vorticity DOES NOT include Coriolis parameter f.
+    """
+    ukey, vkey = f'u{lev}', f'v{lev}'
+    missing = [name for name in (ukey, vkey, f'gh{lev}') if name not in fields]
+    if missing:
+        print(f'Skipping {lev}-mb relative vorticity; missing {missing}')
+        return None
+    u = smooth(fields[ukey], VORTICITY_WIND_SMOOTH_SIGMA)
+    v = smooth(fields[vkey], VORTICITY_WIND_SMOOTH_SIGMA)
+    _, duy = grad.gradient(u)
+    dvx, _ = grad.gradient(v)
+    zeta_scaled = (dvx - duy) * 1.0e5
+    zeta_scaled = smooth(zeta_scaled, VORTICITY_DISPLAY_SMOOTH_SIGMA)
+    # Suppress pressure surfaces below local terrain, without altering the
+    # native U/V arrays used for barbs or any other winter products.
+    if 'psfc' in fields:
+        visible = np.asarray(fields['psfc'], float) >= lev * 100.0 + 500.0
+        zeta_scaled = np.where(visible, zeta_scaled, np.nan)
+    return zeta_scaled
 
 
 def diagnostics_for_level(lev, fields, grad):
@@ -697,7 +740,28 @@ WSPD_COLORS = ["#ffffff","#def0fd","#cae6fc","#b7defb","#a4d5fa","#92cdf8","#8ab
 WSPD_CMAP = colors.ListedColormap(WSPD_COLORS, name='midlevelwinds_bins')
 WSPD_NORM = colors.BoundaryNorm(WSPD_BOUNDS, WSPD_CMAP.N, clip=True)
 WSPD_TICKS = np.arange(20, 82, 5)
-HEIGHT_CONTOUR_INTERVALS_DAM = {925: 3, 850: 3, 700: 3}  # 3 dam = 30 m
+HEIGHT_CONTOUR_INTERVALS_DAM = {925: 3, 850: 3, 700: 3, 500: 3}  # 3 dam = 30 m
+
+# RRFS-MPAS relative vorticity: exact SPCOA pressure-level color table.
+# Negative vorticity: black -> gray; neutral: white; positive: yellow -> red.
+# Field units after calculation are 10^-5 s^-1. 45 bins, 46 edges.
+VORTICITY_BOUNDS = np.arange(-40.0, 52.0, 2.0, dtype=np.float64)
+VORTICITY_COLORS = [
+    '#000000', '#0f0f0f', '#1e1e1e', '#303030', '#434343', '#555555', '#636363', '#717171', '#7f7f7f', '#8f8f8f',
+    '#9e9e9e', '#afafaf', '#bebebe', '#cbcbcb', '#d6d6d6', '#e1e1e1', '#eaeaea', '#f3f3f3', '#f9f9f9', '#ffffff',
+    '#ffffff', '#ffffcc', '#fff9bd', '#fff3ae', '#ffec9f', '#ffe590', '#fede82', '#fed673', '#fec965', '#feba55',
+    '#fead4a', '#fea044', '#fd933f', '#fd8239', '#fc6c33', '#fc572c', '#f74327', '#ed3022', '#e51e1d', '#d9131f',
+    '#cb0a22', '#be0126', '#aa0026', '#950026', '#800026',
+ ]
+assert len(VORTICITY_COLORS) == len(VORTICITY_BOUNDS) - 1
+VORTICITY_CMAP = colors.ListedColormap(VORTICITY_COLORS, name='spcoa_relative_vorticity')
+# Exceeding +/- palette bounds receives saturated endpoint colors and arrowheads.
+VORTICITY_CMAP.set_under(VORTICITY_COLORS[0])
+VORTICITY_CMAP.set_over(VORTICITY_COLORS[-1])
+VORTICITY_NORM = colors.BoundaryNorm(VORTICITY_BOUNDS, VORTICITY_CMAP.N, clip=False)
+VORTICITY_TICKS = np.arange(-40, 51, 10)
+VORTICITY_WIND_SMOOTH_SIGMA = 3.0  # smooth vectors BEFORE spatial derivatives
+VORTICITY_DISPLAY_SMOOTH_SIGMA = 1.0  # additional display-only vorticity smoothing
 
 # Surface wind products (mph). Use the established wind-speed palette, now
 # interpreted as mph with the familiar white lowest bin. Values under 20 mph
@@ -1191,13 +1255,16 @@ def new_map(title, subtitle, ptype=False):
     return fig,ax
 
 
-def finish(fig, ax, fname, label=None, cf=None):
+def finish(fig, ax, fname, label=None, cf=None, colorbar_extend=None):
     if cf is not None:
         # CAMs reference: make_axes_locatable, bottom bar 3%, 0.25 in padding.
         divider=make_axes_locatable(ax)
         cax=divider.append_axes('bottom',size='3%',pad=.25,axes_class=plt.Axes)
-        cb=fig.colorbar(cf,cax=cax,orientation='horizontal',spacing='uniform',
-                        drawedges=not (label and 'Temperature' in label))
+        cb_kwargs = {'cax':cax, 'orientation':'horizontal', 'spacing':'uniform',
+                     'drawedges':not (label and 'Temperature' in label)}
+        if colorbar_extend is not None:
+            cb_kwargs['extend'] = colorbar_extend
+        cb=fig.colorbar(cf, **cb_kwargs)
         if label:
             cb.set_label(label,fontsize=10,weight='bold')
             cb.ax.xaxis.set_label_position('top')
@@ -1208,6 +1275,8 @@ def finish(fig, ax, fname, label=None, cf=None):
             apply_colorbar_ticks(cb, PRESSURE_TEMP_TICKS, fontsize=7)
         elif label and 'Wind Speed (kt)' in label:
             apply_colorbar_ticks(cb, WSPD_TICKS, fontsize=8)
+        elif label and 'Relative Vorticity' in label:
+            apply_colorbar_ticks(cb, VORTICITY_TICKS, fontsize=8)
         elif label == '10-m Wind Gust (mph)':
             apply_colorbar_ticks(cb, GUST10M_TICKS, fontsize=8)
         elif label == '10-m Wind Speed (mph)':
@@ -1958,6 +2027,40 @@ def plot_level_windspeed(lat, lon, fields, lev, cycle_id):
 
 
 
+def plot_level_relative_vorticity(lat, lon, fields, lev, cycle_id, grad):
+    """Plot 850/700/500-mb relative vorticity, black heights and wind barbs.
+
+    Shading: +/- relative vorticity in 10^-5 s^-1 using the exact SPCOA
+    discrete -40..+50 palette. Above/below limits are colored, and the
+    horizontal colorbar has triangles at BOTH ends (extend='both').
+    """
+    if lev not in VORTICITY_LEVELS_HPA:
+        raise ValueError(f'Unsupported vorticity level {lev}')
+    vort = calculate_relative_vorticity(lat, lon, fields, lev, grad)
+    if vort is None or not np.isfinite(vort).any():
+        print(f'Skipping {lev}-mb relative vorticity: no valid calculated values')
+        return None
+    title = f'RRFS-MPAS | {lev} mb Relative Vorticity, Heights, and Winds'
+    fig, ax = new_map(title, title_info(cycle_id))
+    x, y, z = mesh_values(lon, lat, vort)
+    cf = ax.contourf(x, y, z, levels=VORTICITY_BOUNDS,
+                     cmap=VORTICITY_CMAP, norm=VORTICITY_NORM,
+                     extend='both', transform=PLATE, zorder=2)
+    # Both pressure-height labels and 850/700/500-mb wind barbs share the
+    # exact level of the shaded vorticity (not 10-m or adjacent-level winds).
+    plot_level_heights(ax, lon, lat, fields, lev)
+    wind_barbs(ax, lon, lat, {
+        'u': np.asarray(fields[f'u{lev}'], float),
+        'v': np.asarray(fields[f'v{lev}'], float)
+    })
+    # No numeric city values for pressure-level vorticity maps.
+    filename = f'rrfs_mpas_rvort{lev}_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    finish(fig, ax, filename,
+           label=f'{lev}-mb Relative Vorticity (10⁻⁵ s⁻¹)',
+           cf=cf, colorbar_extend='both')
+    return filename
+
+
 def stage_site_run(payload):
     """Prepare a LOCAL site directory; no S3 credentials or uploads required.
 
@@ -2079,8 +2182,12 @@ def run():
         if DO_LEVEL_WSPD:
             for lev in LEVELS_HPA:
                 add(plot_level_windspeed(lat,lon,fields,lev,cycle_id))
-        if DO_ADV or DO_FGEN:
+        if DO_LEVEL_VORTICITY or DO_ADV or DO_FGEN:
             grad=GeographicGradient(lat,lon)
+        if DO_LEVEL_VORTICITY:
+            for lev in VORTICITY_LEVELS_HPA:
+                add(plot_level_relative_vorticity(lat,lon,fields,lev,cycle_id,grad))
+        if DO_ADV or DO_FGEN:
             for lev in LEVELS_HPA:
                 diag=diagnostics_for_level(lev,fields,grad)
                 if diag is None:continue
