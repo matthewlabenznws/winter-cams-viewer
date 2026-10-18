@@ -707,19 +707,65 @@ SFC_WIND_MPH_CMAP = colors.ListedColormap(WSPD_COLORS, name='surface_wind_mph')
 SFC_WIND_MPH_NORM = colors.BoundaryNorm(SFC_WIND_MPH_BOUNDS, SFC_WIND_MPH_CMAP.N, clip=True)
 SFC_WIND_MPH_TICKS = np.arange(20, 82, 5)
 
-# 2-m RH in 5%-wide bins, dry oranges -> neutral -> moist blue/teal/green.
-# Colors are initial defaults; the user can replace them with a custom palette.
-RH2M_BOUNDS = np.arange(0., 101., 5.)
-RH2M_COLORS = [
-    '#a64923', '#c8662a', '#df8b37', '#eda845', '#f2c35d',
-    '#f4d97b', '#f5e8a2', '#f3f0c9', '#edf4ee', '#d6edf4',
-    '#bfe5ee', '#a1dae5', '#80cbdc', '#5bb7cf', '#399fbd',
-    '#218ea8', '#1c7e95', '#17747f', '#14695f', '#11583e'
+# Custom 10-m gust palette supplied by user (15–74 mph in 1-mph bins).
+GUST10M_BOUNDS = np.arange(15., 75., 1.)
+GUST10M_COLORS = [
+    '#ffffff', '#f1f8ff', '#def0fd', '#cae6fc', '#b7defb', '#a4d5fa', '#92cdf8', '#8ab6ef', '#839fe6', '#7c87dd',
+    '#7570d4', '#6e59cb', '#8566ce', '#9c72d1', '#b27fd5', '#ca8bd8', '#e298db', '#dc8cd5', '#d580cf', '#cf74c9',
+    '#c969c3', '#c35dbd', '#bb4fb5', '#b342ad', '#ab35a5', '#a3289d', '#9b1d95', '#a21c80', '#a91c6a', '#b11c55',
+    '#b81c41', '#c01c2e', '#c42032', '#c72435', '#d33441', '#d73b45', '#df494c', '#e35050', '#e75754', '#e97559',
+    '#ec935d', '#efb262', '#f3d167', '#f7f16b', '#f0e765', '#eadd60', '#e4d35a', '#dec954', '#d8bf4e', '#d1b548',
+    '#cbab42', '#c5a13c', '#bf9737', '#b98e31', '#b3842b', '#ad7a26', '#a77021', '#a1661c', '#9b5c17',
 ]
-assert len(RH2M_COLORS) == len(RH2M_BOUNDS) - 1, 'RH bins mismatch'
-RH2M_CMAP = colors.ListedColormap(RH2M_COLORS, name='two_meter_rh')
+assert len(GUST10M_COLORS) == len(GUST10M_BOUNDS) - 1, 'Gust bins mismatch'
+GUST10M_CMAP = colors.ListedColormap(GUST10M_COLORS, name='gust_bins')
+GUST10M_NORM = colors.BoundaryNorm(GUST10M_BOUNDS, GUST10M_CMAP.N, clip=True)
+GUST10M_TICKS = np.arange(15, 76, 5)
+
+# 2-m RH in 1%-wide bins using user's custom palette.
+RH2M_BOUNDS = np.arange(-1., 101., 1.)
+RH2M_COLORS = [
+    '#a1744f','#966d4b','#8b6648','#816044','#765940','#6c523c','#624b38','#574434','#4c3d30','#42362d','#372f28','#3b352a','#413a2f','#464035','#4c453a',
+    '#514b3f','#575044','#5c554a','#625b4f','#676054','#6d6559','#736b5f','#787064','#7e766a','#837b6f','#898074','#8e867a','#948b7f','#999084','#9f968a',
+    '#a49b8f','#aaa195','#b0a69a','#b5ab9f','#bbb1a4','#c0b6aa','#c6bbaf','#cbc1b4','#d1c6b9','#d6ccbf','#dcd1c4','#c9d7c0','#c5d4bd','#c1d1ba','#bdceb7',
+    '#b9cbb4','#b5c9b1','#b1c6ae','#adc3ab','#a9c0a8','#a5bda5','#a1baa2','#9db79f','#99b49c','#95b29a','#92af97','#8eac94','#8aa991','#86a68e','#82a38b',
+    '#7d9f88','#799c85','#769a82','#72977f','#6e947c','#6a9179','#668e76','#628b73','#5f8870','#5b856d','#57836a','#538067','#4f7d64','#4b7a61','#47775e',
+    '#43745b','#407158','#3c6e55','#386c53','#356950','#31664d','#2e634a','#2a6047','#275d44','#235a41','#1f573e','#1c553b','#195238','#164f35','#164f35',
+    '#134c32','#10492f','#0c4023','#11422e','#144538','#184743','#1b494d','#1f4c57','#234e61','#27506c','#2b5276','#2f5581','#33578b',
+]
+# The supplied RH table has 103 colors for 101 1%-wide bins.
+# BoundaryNorm spans all 103 supplied colors across the 101 intervals (two skipped),
+# preserving the exact user-supplied bounds/colors instead of shifting percentages.
+assert len(RH2M_COLORS) >= len(RH2M_BOUNDS) - 1, 'RH palette too short'
+RH2M_CMAP = colors.ListedColormap(RH2M_COLORS, name='rh_bins')
 RH2M_NORM = colors.BoundaryNorm(RH2M_BOUNDS, RH2M_CMAP.N, clip=True)
 RH2M_TICKS = np.arange(0, 101, 10)
+
+# Exact user-supplied 2-m dewpoint color scale (-41 to +90 deg F in 1F bins).
+DEW2M_BOUNDS = np.arange(-41., 91., 1.)
+DEW2M_COLORS = [
+    '#946e4f','#926d4e','#906c4e','#8e6b4d','#8c6a4d','#8b694c','#89674c','#87664b',
+    '#85654a','#83644a','#816349','#7f6249','#7d6147','#7b6047','#795f46','#775e45',
+    '#755c45','#735b44','#715a44','#705943','#6f5843','#6d5742','#6b5641','#695541',
+    '#675440','#655340','#63513f','#61503e','#5f4f3e','#5d4e3d','#5b4c3d','#594b3c','#574a3c',
+    '#56493b','#54483a','#52473a','#504539','#4e4439','#4c4338','#4a4237','#484136',
+    '#4c4335','#504739','#554c3d','#595042','#5d5546','#61594a','#665e4e','#6a6252',
+    '#6e6756','#736b5b','#77705f','#7b7463','#7f7967','#847d6b','#888270','#8c8674',
+    '#918b78','#958f7c','#999480','#9d9884','#a29d89','#a6a18d','#aaa691','#aeaa95',
+    '#b3af99','#b7b39d','#bbb8a2','#c0bca6','#c4c1aa','#c8c5ae','#cccab2','#d1ceb7',
+    '#d5d3bb','#d9d7bf','#dedcc3','#e2e0c7','#e6e5cb','#eae9d0','#efeed4','#f3f2d8',
+    '#e7f5e6','#d9f0d7','#caeac9','#bce4ba','#aedeab','#a0d99c','#92d38d','#84ce7f',
+    '#76c870','#69c362','#42ad35','#3da231','#38982c','#338d27','#2d8222','#28781e',
+    '#236d19','#1e6215','#195810','#144d0c','#6aa2ae','#60959f','#588891','#4e7a82',
+    '#456d73','#3c6066','#325357','#294648','#20393a','#162c2b','#686699','#625e93',
+    '#5b568d','#554e87','#4f4681','#483e7b','#423675','#3c2e6f','#352669','#2f1d63',
+    '#704170','#754673','#7a4c75','#805176','#855778','#8b5c7a','#90627c','#96677d',
+    '#9b6d7f','#a07281',
+]
+assert len(DEW2M_COLORS) == len(DEW2M_BOUNDS) - 1, 'Dewpoint bins mismatch'
+DEW2M_CMAP = colors.ListedColormap(DEW2M_COLORS, name='dewpoint_bins')
+DEW2M_NORM = colors.BoundaryNorm(DEW2M_BOUNDS, DEW2M_CMAP.N, clip=True)
+DEW2M_TICKS = np.arange(-40, 91, 10)
 
 
 # EXACT user-supplied QPF palette: 52 discrete colors and 53 boundaries.
@@ -781,7 +827,10 @@ assert len(SNOWFALL_COLORS) == len(SNOWFALL_BOUNDS) - 1, 'Snowfall bins mismatch
 SNOWFALL_CMAP = colors.ListedColormap(SNOWFALL_COLORS, name='snowfall_bins')
 SNOWFALL_NORM = colors.BoundaryNorm(SNOWFALL_BOUNDS, SNOWFALL_CMAP.N, clip=True)
 # Label key values rather than every one-inch boundary on the figure.
-SNOWFALL_TICKS = [0, .1, .5, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 35, 40, 45, 48]
+# Match the snowfall reference graphic: 0.1; 1 through 10 by 1; 12 through 48 by 2.
+# These are display tick positions; all original 59 color bins remain unchanged.
+SNOWFALL_TICKS = [0.1] + list(range(1, 11)) + list(range(12, 49, 2))
+SNOWFALL_TICK_LABELS = ['0.1'] + [str(n) for n in range(1, 11)] + [str(n) for n in range(12, 49, 2)]
 
 
 def _unpack_map_shapefile_archive(archive_path):
@@ -1159,12 +1208,14 @@ def finish(fig, ax, fname, label=None, cf=None):
             apply_colorbar_ticks(cb, PRESSURE_TEMP_TICKS, fontsize=7)
         elif label and 'Wind Speed (kt)' in label:
             apply_colorbar_ticks(cb, WSPD_TICKS, fontsize=8)
-        elif label in ('10-m Wind Gust (mph)', '10-m Wind Speed (mph)'):
+        elif label == '10-m Wind Gust (mph)':
+            apply_colorbar_ticks(cb, GUST10M_TICKS, fontsize=8)
+        elif label == '10-m Wind Speed (mph)':
             apply_colorbar_ticks(cb, SFC_WIND_MPH_TICKS, fontsize=8)
         elif label == '2-m Relative Humidity (%)':
             apply_colorbar_ticks(cb, RH2M_TICKS, fontsize=8)
         elif label == '2-m Dewpoint (°F)':
-            apply_colorbar_ticks(cb, SFC_TEMP_TICKS, fontsize=8)
+            apply_colorbar_ticks(cb, DEW2M_TICKS, fontsize=8)
         elif label in ('Total Precipitation (inches)', 'Snow-water equivalent (inches)'):
             cb.set_ticks(QPF_TICKS)
             cb.set_ticklabels(QPF_TICK_LABELS)
@@ -1173,7 +1224,14 @@ def finish(fig, ax, fname, label=None, cf=None):
                               labelsize=8, pad=3)
         elif label in ('Accumulated Snowfall (inches)',
                        '10:1 Snowfall Estimate (inches)'):
-            apply_colorbar_ticks(cb, SNOWFALL_TICKS, fontsize=8)
+            cb.set_ticks(SNOWFALL_TICKS)
+            cb.set_ticklabels(SNOWFALL_TICK_LABELS)
+            # Reference image displays the numeric snowfall labels ABOVE the bar.
+            # Put the product/unit label below, so it does not overlap the ticks.
+            cb.ax.xaxis.set_ticks_position('top')
+            cb.ax.xaxis.set_label_position('bottom')
+            cb.ax.tick_params(axis='x', which='both', length=0, width=0,
+                              labeltop=True, labelbottom=False, labelsize=8, pad=3)
     # Watermark INSIDE the geographic plot, not in the white outer margin.
     ax.text(.995,.012,'RRFS-MPAS GSL EXPERIMENTAL · evaluation only',
             transform=ax.transAxes,ha='right',va='bottom',fontsize=8,
@@ -1517,8 +1575,13 @@ def city_grid_values(lat, lon, values):
     return out
 
 
-def add_lbf_city_values(ax, lat, lon, values, layer, fmt):
-    """Value ABOVE the city name; all text on top, no city dot or marker."""
+def add_lbf_city_values(ax, lat, lon, values, layer, fmt,
+                        min_display_value=None):
+    """Value ABOVE city name; suppress accumulation amounts rounding to zero.
+
+    min_display_value is in the units of the plotted city values. The city
+    names themselves are rendered elsewhere and are always retained.
+    """
     if not (SHOW_LBF_CITY_VALUES and SHOW_CITY_LABELS and DOMAIN_NAME=='lbf'
             and CITY_VALUE_LAYERS.get(layer, False)):
         return
@@ -1528,7 +1591,14 @@ def add_lbf_city_values(ax, lat, lon, values, layer, fmt):
         if value is None or not (EXTENT[0] <= cl <= EXTENT[1]
                                   and EXTENT[2] <= ct <= EXTENT[3]):
             continue
-        ax.text(cl, ct+CITY_VALUE_OFFSET_DEG, fmt(value), transform=PLATE,
+        # Only label measurable city precipitation/snowfall accumulations.
+        # QPF/SWE print hundredths; snowfall prints tenths.
+        if min_display_value is not None and value < min_display_value:
+            continue
+        formatted = fmt(value)
+        if min_display_value is not None and formatted in ('0.00"', '0.0"'):
+            continue
+        ax.text(cl, ct+CITY_VALUE_OFFSET_DEG, formatted, transform=PLATE,
                 ha='center', va='center', fontsize=8.4, weight='bold',
                 color='white', zorder=CITY_LABEL_ZORDER+5, clip_on=True,
                 path_effects=[pe.withStroke(linewidth=1.9,
@@ -1564,7 +1634,7 @@ def plot_qpf(lat,lon,fields,cycle_id):
     cf=ax.contourf(x,y,shade_at_palette_limits(z,QPF_BOUNDS),
                    levels=QPF_BOUNDS,cmap=QPF_CMAP,norm=QPF_NORM,
                    transform=PLATE,zorder=2)
-    add_lbf_city_values(ax,lat,lon,qpf_in,'qpf',inches_text)
+    add_lbf_city_values(ax,lat,lon,qpf_in,'qpf',inches_text, min_display_value=0.005)
     filename=f'rrfs_mpas_qpf_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'Total Precipitation (inches)',cf)
     return filename
@@ -1576,13 +1646,13 @@ def plot_accumulated_snowfall(lat,lon,fields,cycle_id):
         print('Skipping native accumulated snowfall: ASNOW 0-F accumulation not found')
         return None
     snow_inches=np.maximum(np.asarray(fields['asnow'],float),0.0)*39.3700787402
-    fig,ax=new_map(f'Accumulated Snowfall (ASNOW; 0–F{FORECAST_HOUR:03d})',
+    fig,ax=new_map(f'Accumulated Snowfall (0–F{FORECAST_HOUR:03d})',
                    title_info(cycle_id))
     x,y,z=mesh_values(lon,lat,snow_inches)
     cf=ax.contourf(x,y,shade_at_palette_limits(z,SNOWFALL_BOUNDS),
                    levels=SNOWFALL_BOUNDS,cmap=SNOWFALL_CMAP,
                    norm=SNOWFALL_NORM,transform=PLATE,zorder=2)
-    add_lbf_city_values(ax,lat,lon,snow_inches,'asnow',snowfall_inches_text)
+    add_lbf_city_values(ax,lat,lon,snow_inches,'asnow',snowfall_inches_text, min_display_value=0.05)
     filename=f'rrfs_mpas_asnow_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'Accumulated Snowfall (inches)',cf)
     return filename
@@ -1600,13 +1670,13 @@ def plot_snowfall_10to1(lat,lon,fields,cycle_id):
         print('Skipping 10:1 snowfall estimate: cumulative WEASD not found')
         return None
     snow_inches = snowfall_10to1_from_weasd(fields['weasd'])
-    fig,ax = new_map(f'10:1 Snowfall Estimate (WEASD; 0–F{FORECAST_HOUR:03d})',
+    fig,ax = new_map(f'10:1 Snowfall Estimate (0–F{FORECAST_HOUR:03d})',
                      title_info(cycle_id))
     x,y,z = mesh_values(lon,lat,snow_inches)
     cf = ax.contourf(x,y,shade_at_palette_limits(z,SNOWFALL_BOUNDS),
                      levels=SNOWFALL_BOUNDS,cmap=SNOWFALL_CMAP,
                      norm=SNOWFALL_NORM,transform=PLATE,zorder=2)
-    add_lbf_city_values(ax,lat,lon,snow_inches,'snow10to1',snowfall_inches_text)
+    add_lbf_city_values(ax,lat,lon,snow_inches,'snow10to1',snowfall_inches_text, min_display_value=0.05)
     filename = f'rrfs_mpas_snow10to1_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'10:1 Snowfall Estimate (inches)',cf)
     return filename
@@ -1624,7 +1694,7 @@ def plot_snow_water_equivalent(lat,lon,fields,cycle_id):
     cf=ax.contourf(x,y,shade_at_palette_limits(z,QPF_BOUNDS),
                    levels=QPF_BOUNDS,cmap=QPF_CMAP,norm=QPF_NORM,
                    transform=PLATE,zorder=2)
-    add_lbf_city_values(ax,lat,lon,swe_inches,'weasd',inches_text)
+    add_lbf_city_values(ax,lat,lon,swe_inches,'weasd',inches_text, min_display_value=0.005)
     filename=f'rrfs_mpas_weasd_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'Snow-water equivalent (inches)',cf)
     return filename
@@ -1777,9 +1847,9 @@ def plot_10m_gust(lat, lon, fields, cycle_id):
     gust_mph = np.maximum(np.asarray(fields['gust10m'],float), 0.) * 2.2369362921
     fig,ax = new_map('RRFS-MPAS | 10-m Wind Gusts', title_info(cycle_id))
     x,y,z = mesh_values(lon,lat,smooth(gust_mph,1.0))
-    cf = ax.contourf(x,y,shade_at_palette_limits(z,SFC_WIND_MPH_BOUNDS),
-                     levels=SFC_WIND_MPH_BOUNDS,cmap=SFC_WIND_MPH_CMAP,
-                     norm=SFC_WIND_MPH_NORM,transform=PLATE,zorder=2)
+    cf = ax.contourf(x,y,shade_at_palette_limits(z,GUST10M_BOUNDS),
+                     levels=GUST10M_BOUNDS,cmap=GUST10M_CMAP,
+                     norm=GUST10M_NORM,transform=PLATE,zorder=2)
     if 'u10' in fields and 'v10' in fields:
         wind_barbs(ax,lon,lat,{'u':np.asarray(fields['u10'],float),
                                'v':np.asarray(fields['v10'],float)})
@@ -1812,8 +1882,8 @@ def plot_2m_dewpoint(lat, lon, fields, cycle_id):
     dew_f = (np.asarray(fields['d2m'],float) - 273.15) * 1.8 + 32.
     fig,ax = new_map('RRFS-MPAS | 2-m Dewpoint',title_info(cycle_id))
     x,y,z = mesh_values(lon,lat,smooth(dew_f,1.0))
-    cf = ax.contourf(x,y,shade_at_palette_limits(z,SFC_TEMP_BOUNDS),
-                     levels=SFC_TEMP_BOUNDS,cmap=SFC_TEMP_CMAP,norm=SFC_TEMP_NORM,
+    cf = ax.contourf(x,y,shade_at_palette_limits(z,DEW2M_BOUNDS),
+                     levels=DEW2M_BOUNDS,cmap=DEW2M_CMAP,norm=DEW2M_NORM,
                      transform=PLATE,zorder=2)
     add_lbf_city_values(ax,lat,lon,dew_f,'d2m',lambda v:f'{v:.0f}°F')
     filename = f'rrfs_mpas_d2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
