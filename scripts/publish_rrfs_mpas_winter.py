@@ -6,6 +6,7 @@ No delete operations, and never touch the existing severe CAMs paths.
 Usage:
   python scripts/publish_rrfs_mpas_winter.py --stage ./output/site_export
   python scripts/publish_rrfs_mpas_winter.py --stage ./output/site_export --dry-run
+  python scripts/publish_rrfs_mpas_winter.py --stage ./output/site_export --cycle 2026101800 --forecast-hour 6
 
 Required: AWS_BUCKET and AWS_REGION. Credentials use the standard AWS SDK
 chain (GitHub Actions can provide AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY).
@@ -30,9 +31,23 @@ def get_site_root(stage: Path) -> Path:
     return root
 
 
-def validate_local_run(root: Path) -> tuple[list[Path],list[dict]]:
-    """Validate every file referenced by the current local per-FHR manifests."""
-    manifests = sorted(root.glob('*/manifest_f[0-9][0-9][0-9].json'))
+def validate_local_run(root: Path, cycle: str | None = None,
+                       forecast_hour: int | None = None) -> tuple[list[Path], list[dict]]:
+    """Validate only selected forecast-hour manifests and their PNGs.
+
+    A staged run accumulates hours. This filter prevents re-uploading earlier
+    hours each time a new hour finishes rendering.
+    """
+    if (cycle is None) != (forecast_hour is None):
+        raise ValueError('Specify both --cycle and --forecast-hour, or neither')
+    if cycle is not None:
+        if not re.fullmatch(r'\d{10}', cycle) or not (0 <= forecast_hour <= 120):
+            raise ValueError('Invalid cycle or forecast hour')
+        manifests = [root / cycle / f'manifest_f{forecast_hour:03d}.json']
+        if not manifests[0].is_file():
+            raise FileNotFoundError(f'Missing hourly manifest: {manifests[0]}')
+    else:
+        manifests = sorted(root.glob('*/manifest_f[0-9][0-9][0-9].json'))
     if not manifests:
         raise RuntimeError('No forecast-hour manifests found; refusing to upload a blank index')
     pngs = []
@@ -124,9 +139,10 @@ def load_remote_index(client,bucket) -> dict:
         raise
 
 
-def publish(stage: Path, dry_run=False) -> dict:
+def publish(stage: Path, dry_run=False, cycle: str | None = None,
+            forecast_hour: int | None = None) -> dict:
     root=get_site_root(stage)
-    pngs,entries=validate_local_run(root)
+    pngs,entries=validate_local_run(root, cycle=cycle, forecast_hour=forecast_hour)
     manifest_files=[root / e['manifest'] for e in entries]
     print(f'Validated {len(pngs)} PNGs and {len(manifest_files)} manifests for {len(entries)} FHRs')
     if dry_run:
@@ -185,8 +201,12 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--stage',required=True,type=Path)
     p.add_argument('--dry-run',action='store_true')
+    p.add_argument('--cycle', help='Filter one YYYYMMDDHH cycle (requires --forecast-hour)')
+    p.add_argument('--forecast-hour', type=int, help='Filter one hour (requires --cycle)')
     args=p.parse_args()
-    publish(args.stage,args.dry_run)
+    if (args.cycle is None) != (args.forecast_hour is None):
+        p.error('--cycle and --forecast-hour must be used together')
+    publish(args.stage,args.dry_run,cycle=args.cycle,forecast_hour=args.forecast_hour)
 
 if __name__=='__main__':
     main()
