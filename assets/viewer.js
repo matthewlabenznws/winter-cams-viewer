@@ -21,7 +21,6 @@
     gust10m: '10-m Wind Gusts (mph)',
     rh2m: '2-m Relative Humidity',
     d2m: '2-m Dewpoint (°F)',
-    wspd10m: '10-m Wind Speed (mph)',
     rvort850: '850-mb Relative Vorticity + Heights + Winds',
     rvort700: '700-mb Relative Vorticity + Heights + Winds',
     rvort500: '500-mb Relative Vorticity + Heights + Winds',
@@ -35,6 +34,9 @@
     fgen_700mb: '700-mb Advection + Frontogenesis',
     thickness_mslp: '1000–500-mb Thickness + MSLP'
   };
+  // Historical S3 manifests may still list this retired product.
+  // Hide it in every selector without deleting or modifying older S3 files.
+  const RETIRED_PRODUCT_IDS = new Set(['wspd10m']);
   const PRODUCT_ORDER = Object.keys(PRODUCT_LABELS);
   const urlParams = new URLSearchParams(location.search);
   const initial = {
@@ -319,7 +321,7 @@
     return state.productCatalog.get(id);
   }
   function sortedKeys(keys) {
-    return [...keys].sort((a,b) => {
+    return [...keys].filter(k => !RETIRED_PRODUCT_IDS.has(k)).sort((a,b) => {
       const ai=PRODUCT_ORDER.indexOf(a), bi=PRODUCT_ORDER.indexOf(b);
       return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi) || a.localeCompare(b);
     });
