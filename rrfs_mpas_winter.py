@@ -15,8 +15,8 @@ before publishing maps. No substitute CWA geography is fabricated.
 Products: 1-km/composite reflectivity + P-type, cumulative 0–F QPF, 2-m temperature,
 925/850/700-mb shaded temperature + black heights/barbs (no isotherms),
 wind speed + heights/barbs, shaded 850/700/500-mb relative vorticity
-with geopotential height contours and earth-relative wind barbs; native surface gusts, 2-m RH and dewpoint,
-10-m sustained winds/barbs, combined temperature advection/frontogenesis (no advection-only map),
+with geopotential height contours and earth-relative wind barbs; native surface gusts without barbs,
+2-m RH and dewpoint, combined temperature advection/frontogenesis (no advection-only map),
 optional native accumulated snowfall, a separate 10:1 SWE-based snowfall
 estimate, and snow-water equivalent; LBF city labels and values.
 
@@ -127,7 +127,6 @@ DO_2M_TEMP = True
 DO_10M_GUST = True          # instantaneous GUST, converted to mph
 DO_2M_RH = True             # native 2-m RH (%)
 DO_2M_DEWPOINT = True       # native 2-m dewpoint (K -> F)
-DO_10M_WSPD = True          # 10-m U/V vector magnitude (mph) + barbs
 DO_LEVEL_TEMP = True
 DO_LEVEL_WSPD = True
 DO_LEVEL_VORTICITY = True  # 850/700/500 mb relative vorticity + heights + barbs
@@ -187,7 +186,7 @@ SHOW_LBF_CITY_VALUES = True
 CITY_VALUE_LAYERS = {
     'qpf': True, 't2m': True, 'asnow': True, 'snow10to1': True, 'weasd': True,
     'pressure_temp': True, 'pressure_wind': False,
-    'gust10m': True, 'rh2m': True, 'd2m': True, 'wspd10m': True,
+    'gust10m': True, 'rh2m': True, 'd2m': True,
 }
 CITY_VALUE_OFFSET_DEG = 0.095     # position value a little closer to city name
 CITY_MAX_SAMPLE_DISTANCE_KM = 20.0
@@ -319,8 +318,6 @@ def field_definitions(fhr: int):
         'gust10m': lambda k: k[:3] == (0, 2, 22) and k[3] == 'surface' and k[5] == 'instant',
         'rh2m': lambda k: k[:3] == (0, 1, 1) and k[3:5] == ('heightAboveGround', 2) and k[5] == 'instant',
         'd2m': lambda k: k[:3] == (0, 0, 6) and k[3:5] == ('heightAboveGround', 2) and k[5] == 'instant',
-        'u10': lambda k: k[:3] == (0, 2, 2) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
-        'v10': lambda k: k[:3] == (0, 2, 3) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
         'mslp':   lambda k: k[:3] == (0, 3, 198) and k[3] == 'meanSea' and k[5] == 'instant',
         'psfc':   lambda k: k[:3] == (0, 3, 0) and k[3] == 'surface' and k[5] == 'instant',
         'gh500':  lambda k: k[:3] == (0, 3, 5) and k[3:5] == ('isobaricInhPa', 500),
@@ -384,8 +381,7 @@ def read_selected_fields(grib_path: Path, fhr: int):
                     missing_value = float(meta(gid, 'missingValue', 9.999e20))
                     arr[~np.isfinite(arr) | np.isclose(arr, missing_value, rtol=0, atol=0)] = np.nan
                     fields[label] = arr
-                    if ((label[0] in ('u', 'v') and label[1:].isdigit())
-                            or label in ('u10','v10')):
+                    if label[0] in ('u', 'v') and label[1:].isdigit():
                         # ecCodes: 1=grid-relative, 0=earth-relative.
                         # Do not default missing metadata to 0 (unsafe).
                         uv_flags[label] = int(meta(gid, 'uvRelativeToGrid', -1))
@@ -442,12 +438,11 @@ def rotate_winds_to_earth(lat, lon, fields, uv_flags, wind_grid_meta):
     earth-relative U/V. No interpolation or regridding is performed.
     """
     if not uv_flags:
-        print('No 10-m or pressure-level wind vectors to rotate.')
+        print('No pressure-level wind vectors to rotate.')
         return fields
 
     wind_levels = tuple(dict.fromkeys(LEVELS_HPA + VORTICITY_LEVELS_HPA))
     wind_pairs = [(f'u{lev}', f'v{lev}') for lev in wind_levels]
-    wind_pairs.insert(0, ('u10', 'v10'))
     for uk, vk in wind_pairs:
         if uk in fields and vk in fields:
             if uk not in uv_flags or vk not in uv_flags or uv_flags[uk] != uv_flags[vk]:
@@ -763,23 +758,17 @@ VORTICITY_TICKS = np.arange(-40, 51, 10)
 VORTICITY_WIND_SMOOTH_SIGMA = 3.0  # smooth vectors BEFORE spatial derivatives
 VORTICITY_DISPLAY_SMOOTH_SIGMA = 1.0  # additional display-only vorticity smoothing
 
-# Surface wind products (mph). Use the established wind-speed palette, now
-# interpreted as mph with the familiar white lowest bin. Values under 20 mph
-# remain white; 20-81 mph shading uses 1-mph bins. Square-ended colorbar.
-SFC_WIND_MPH_BOUNDS = WSPD_BOUNDS.copy()
-SFC_WIND_MPH_CMAP = colors.ListedColormap(WSPD_COLORS, name='surface_wind_mph')
-SFC_WIND_MPH_NORM = colors.BoundaryNorm(SFC_WIND_MPH_BOUNDS, SFC_WIND_MPH_CMAP.N, clip=True)
-SFC_WIND_MPH_TICKS = np.arange(20, 82, 5)
-
-# Custom 10-m gust palette supplied by user (15–74 mph in 1-mph bins).
-GUST10M_BOUNDS = np.arange(15., 75., 1.)
+# Custom gust palette: 15–75 mph, 60 one-mph bins.
+# The supplied 59-color palette ended at 74 mph; repeat the last swatch
+# once to create the 74–75 mph bin without introducing a blank white tail.
+GUST10M_BOUNDS = np.arange(15., 76., 1.)
 GUST10M_COLORS = [
     '#ffffff', '#f1f8ff', '#def0fd', '#cae6fc', '#b7defb', '#a4d5fa', '#92cdf8', '#8ab6ef', '#839fe6', '#7c87dd',
     '#7570d4', '#6e59cb', '#8566ce', '#9c72d1', '#b27fd5', '#ca8bd8', '#e298db', '#dc8cd5', '#d580cf', '#cf74c9',
     '#c969c3', '#c35dbd', '#bb4fb5', '#b342ad', '#ab35a5', '#a3289d', '#9b1d95', '#a21c80', '#a91c6a', '#b11c55',
     '#b81c41', '#c01c2e', '#c42032', '#c72435', '#d33441', '#d73b45', '#df494c', '#e35050', '#e75754', '#e97559',
     '#ec935d', '#efb262', '#f3d167', '#f7f16b', '#f0e765', '#eadd60', '#e4d35a', '#dec954', '#d8bf4e', '#d1b548',
-    '#cbab42', '#c5a13c', '#bf9737', '#b98e31', '#b3842b', '#ad7a26', '#a77021', '#a1661c', '#9b5c17',
+    '#cbab42', '#c5a13c', '#bf9737', '#b98e31', '#b3842b', '#ad7a26', '#a77021', '#a1661c', '#9b5c17', '#9b5c17',
 ]
 assert len(GUST10M_COLORS) == len(GUST10M_BOUNDS) - 1, 'Gust bins mismatch'
 GUST10M_CMAP = colors.ListedColormap(GUST10M_COLORS, name='gust_bins')
@@ -1279,8 +1268,6 @@ def finish(fig, ax, fname, label=None, cf=None, colorbar_extend=None):
             apply_colorbar_ticks(cb, VORTICITY_TICKS, fontsize=8)
         elif label == '10-m Wind Gust (mph)':
             apply_colorbar_ticks(cb, GUST10M_TICKS, fontsize=8)
-        elif label == '10-m Wind Speed (mph)':
-            apply_colorbar_ticks(cb, SFC_WIND_MPH_TICKS, fontsize=8)
         elif label == '2-m Relative Humidity (%)':
             apply_colorbar_ticks(cb, RH2M_TICKS, fontsize=8)
         elif label == '2-m Dewpoint (°F)':
@@ -1919,9 +1906,6 @@ def plot_10m_gust(lat, lon, fields, cycle_id):
     cf = ax.contourf(x,y,shade_at_palette_limits(z,GUST10M_BOUNDS),
                      levels=GUST10M_BOUNDS,cmap=GUST10M_CMAP,
                      norm=GUST10M_NORM,transform=PLATE,zorder=2)
-    if 'u10' in fields and 'v10' in fields:
-        wind_barbs(ax,lon,lat,{'u':np.asarray(fields['u10'],float),
-                               'v':np.asarray(fields['v10'],float)})
     add_lbf_city_values(ax,lat,lon,gust_mph,'gust10m',lambda v:f'{v:.0f} mph')
     filename = f'rrfs_mpas_gust10m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'10-m Wind Gust (mph)',cf)
@@ -1957,25 +1941,6 @@ def plot_2m_dewpoint(lat, lon, fields, cycle_id):
     add_lbf_city_values(ax,lat,lon,dew_f,'d2m',lambda v:f'{v:.0f}°F')
     filename = f'rrfs_mpas_d2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'2-m Dewpoint (°F)',cf)
-    return filename
-
-def plot_10m_windspeed(lat, lon, fields, cycle_id):
-    """Magnitude of earth-relative 10-m U/V winds, mph, with kt barbs."""
-    if 'u10' not in fields or 'v10' not in fields:
-        print('Skipping 10-m wind speed: missing 10-m U/V pair')
-        return None
-    u=np.asarray(fields['u10'],float)
-    v=np.asarray(fields['v10'],float)
-    wind_mph=np.hypot(u,v)*2.2369362921
-    fig,ax = new_map('RRFS-MPAS | 10-m Wind Speed and Direction',title_info(cycle_id))
-    x,y,z=mesh_values(lon,lat,smooth(wind_mph,1.0))
-    cf=ax.contourf(x,y,shade_at_palette_limits(z,SFC_WIND_MPH_BOUNDS),
-                   levels=SFC_WIND_MPH_BOUNDS,cmap=SFC_WIND_MPH_CMAP,
-                   norm=SFC_WIND_MPH_NORM,transform=PLATE,zorder=2)
-    wind_barbs(ax,lon,lat,{'u':u,'v':v})  # barb values converted to knots internally
-    add_lbf_city_values(ax,lat,lon,wind_mph,'wspd10m',lambda val:f'{val:.0f} mph')
-    filename=f'rrfs_mpas_wspd10m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
-    finish(fig,ax,filename,'10-m Wind Speed (mph)',cf)
     return filename
 
 def plot_level_temperature(lat, lon, fields, lev, cycle_id):
@@ -2174,8 +2139,6 @@ def run():
             add(plot_2m_rh(lat,lon,fields,cycle_id))
         if DO_2M_DEWPOINT:
             add(plot_2m_dewpoint(lat,lon,fields,cycle_id))
-        if DO_10M_WSPD:
-            add(plot_10m_windspeed(lat,lon,fields,cycle_id))
         if DO_LEVEL_TEMP:
             for lev in LEVELS_HPA:
                 add(plot_level_temperature(lat,lon,fields,lev,cycle_id))
