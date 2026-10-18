@@ -1,4 +1,4 @@
-/* Winter CAMs viewer â€” a static GitHub Pages frontend for the RRFS-MPAS
+/* Winter CAMs viewer — a static GitHub Pages frontend for the RRFS-MPAS
    winter JSON + PNG manifest format produced by the GitHub/S3 pipeline.
    No server code, AWS credentials, or third-party JS packages are required. */
 (() => {
@@ -14,7 +14,8 @@
     ptype_ref1km: '1-km Reflectivity + P-Type',
     ptype_refcomp: 'Composite Reflectivity + P-Type',
     qpf: 'Total QPF',
-    asnow: 'Accumulated Snowfall',
+    asnow: 'Accumulated Snowfall (Model)',
+    snow10to1: '10:1 Snowfall Estimate',
     weasd: 'Snow-Water Equivalent',
     t2m: '2-m Temperature',
     t925: '925-mb Temperature', t850: '850-mb Temperature', t700: '700-mb Temperature',
@@ -25,7 +26,7 @@
     fgen_925mb: '925-mb Advection + Frontogenesis',
     fgen_850mb: '850-mb Advection + Frontogenesis',
     fgen_700mb: '700-mb Advection + Frontogenesis',
-    thickness_mslp: '1000â€“500-mb Thickness + MSLP'
+    thickness_mslp: '1000–500-mb Thickness + MSLP'
   };
   const PRODUCT_ORDER = Object.keys(PRODUCT_LABELS);
   const urlParams = new URLSearchParams(location.search);
@@ -333,7 +334,7 @@
     state.playGeneration += 1;
     if (state.timer !== null) window.clearTimeout(state.timer);
     state.timer = null;
-    els.play.textContent = 'â–¶ Play';
+    els.play.textContent = '▶ Play';
     els.play.setAttribute('aria-pressed', 'false');
   }
   function syncAddress() {
@@ -422,7 +423,7 @@
     els.validTime.textContent = 'Waiting for first model run';
     els.title.textContent = 'RRFS-MPAS Winter Forecast';
     els.viewerTitle.textContent = 'RRFS-MPAS Winter Graphics';
-    els.caption.textContent = 'RRFS-MPAS winter graphics Â· Awaiting first published run';
+    els.caption.textContent = 'RRFS-MPAS winter graphics · Awaiting first published run';
     empty('Awaiting RRFS-MPAS winter graphics',
       'Published forecast maps will appear here when the first model run is available on AWS S3.');
     status(message, level);
@@ -430,13 +431,13 @@
   async function refreshRuns(preserveSelection = true) {
     stopAnimation();
     ++state.serial;
-    status('Checking AWS S3 for available winter runsâ€¦');
+    status('Checking AWS S3 for available winter runs…');
     els.refresh.disabled = true;
     try {
       if (!BASE_URL.startsWith('https://')) throw new Error('Configure an HTTPS S3 base URL in assets/config.js');
       const response = await fetch(dataUrl('runs.json'), { cache: 'no-store' });
       if (response.status === 404) {
-        resetForNoRuns('Website ready Â· No winter run index has been published to S3 yet.');
+        resetForNoRuns('Website ready · No winter run index has been published to S3 yet.');
         return;
       }
       if (!response.ok) throw new Error(`S3 returned HTTP ${response.status} for runs.json`);
@@ -451,7 +452,7 @@
       }
       const entries = [...unique.values()].sort((a,b) => b.cycle.localeCompare(a.cycle) || a.forecast_hour-b.forecast_hour);
       if (!entries.length) {
-        resetForNoRuns('Website ready Â· No valid winter forecast hours are published yet.');
+        resetForNoRuns('Website ready · No valid winter forecast hours are published yet.');
         return;
       }
       const oldCycle = state.cycle;
@@ -486,11 +487,11 @@
     renderHourControls();
     els.fhr.textContent = fmtTile(state.hour);
     els.validTime.textContent = utcTime(selected.valid_time_utc);
-    status('Loading ' + state.cycle + 'Z ' + fmtHour(state.hour) + 'â€¦');
+    status('Loading ' + state.cycle + 'Z ' + fmtHour(state.hour) + '…');
     // IMPORTANT: do not clear/hide the current PNG while the next hour loads.
     if (els.image.hidden) {
       els.empty.hidden = false;
-      els.emptyTitle.textContent = 'Loading winter forecastâ€¦';
+      els.emptyTitle.textContent = 'Loading winter forecast…';
       els.emptyDetails.textContent = 'Retrieving the available forecast map for this hour.';
     }
     try {
@@ -512,8 +513,8 @@
       if (!loaded) return false;
       state.manifest = manifest;
       const allSelectedAvailable = activeSlots().every(slot => slot === 'product' ? state.leftLoaded : state[auxPanels[slot].loaded]);
-      status(`Run ${state.cycle}Z Â· ${fmtHour(state.hour)} Â· ${utcTime(manifest.valid_time_utc)}` +
-        (allSelectedAvailable ? '' : ' Â· Some selected products not available at this hour'),
+      status(`Run ${state.cycle}Z · ${fmtHour(state.hour)} · ${utcTime(manifest.valid_time_utc)}` +
+        (allSelectedAvailable ? '' : ' · Some selected products not available at this hour'),
         allSelectedAvailable ? 'success' : 'warning');
       syncAddress();
       return true;
@@ -600,8 +601,8 @@
           state.leftLoaded=true;
           els.empty.hidden=true;
           els.title.textContent=isCompare() ? productLabel(state.product) : `RRFS-MPAS | ${productLabel(state.product)}`;
-          els.meta.textContent=`${DOMAIN_LABELS[domain].toUpperCase()} Â· ${fmtHour(hour)}`;
-          els.caption.textContent=`${cycle}Z run Â· Valid ${utcTime(manifest.valid_time_utc)} Â· ${DOMAIN_LABELS[domain]}`;
+          els.meta.textContent=`${DOMAIN_LABELS[domain].toUpperCase()} · ${fmtHour(hour)}`;
+          els.caption.textContent=`${cycle}Z run · Valid ${utcTime(manifest.valid_time_utc)} · ${DOMAIN_LABELS[domain]}`;
           els.fullLink.href=url;
           els.fullLink.hidden=false;
         } else {
@@ -641,7 +642,7 @@
     stopAnimation();
     state.playing = true;
     const generation = state.playGeneration;
-    els.play.textContent = 'â…¡ Pause';
+    els.play.textContent = 'Ⅱ Pause';
     els.play.setAttribute('aria-pressed', 'true');
     const advance = async () => {
       if (!state.playing || generation !== state.playGeneration) return;
