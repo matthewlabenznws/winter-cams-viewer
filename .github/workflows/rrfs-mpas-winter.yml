@@ -132,6 +132,10 @@ jobs:
           if [[ "$PUBLISH_ARG" == 'true' && "$REBUILD_ARG" != 'true' ]]; then
             cmd+=(--skip-published)
           fi
+          # Upload each FHR immediately, before processing the next FHR.
+          if [[ "$PUBLISH_ARG" == 'true' ]]; then
+            cmd+=(--publish-each-hour)
+          fi
           "${cmd[@]}"
 
       - name: Validate staged PNGs and forecast manifests
@@ -154,17 +158,6 @@ jobs:
               exit 1
             fi
             echo 'No unpublished forecast hours; skipping staging validation.'
-          fi
-
-      - name: Publish newly generated hours and merge runs.json into S3
-        if: ${{ inputs.publish == true || github.event_name == 'schedule' }}
-        shell: bash
-        run: |
-          root="$MPAS_OUT_DIR/site_export/runs/cams/rrfs_mpas/winter"
-          if [[ -d "$root" ]] && find "$root" -name 'manifest_f*.json' -print -quit | grep -q .; then
-            python scripts/publish_rrfs_mpas_winter.py --stage "$MPAS_OUT_DIR/site_export"
-          else
-            echo 'No unpublished hours found. S3 index unchanged.'
           fi
 
       - name: Attach test plots and manifests (manual dry run only)
