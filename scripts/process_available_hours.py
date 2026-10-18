@@ -5,6 +5,9 @@ PNG files + manifest to MPAS_OUT_DIR/site_export. This orchestrator chooses
 actual available hours from the GSL FTP inventory and runs that plotting script
 once per hour, accumulating all results in the same site_export directory.
 
+With --publish-each-hour, each successful hour is uploaded and indexed in S3
+before the next GRIB download begins. Published PNGs are never deleted.
+
 For long runs, print per-hour QPF availability diagnostics and delete the original
 GRIB2 input after successfully staging that forecast hour. This prevents filling
 the GitHub runner disk with dozens of large raw files.
@@ -174,7 +177,7 @@ def build_plan(inventory: dict[str,list[int]], cycle_spec: str,
 
 
 def run_jobs(plan: list[tuple[str,int]], domains: str, script: Path,
-             output: Path, keep_going: bool) -> tuple[list[tuple[str,int]], list[tuple[str,int,str]]]:
+             output: Path, keep_going: bool, publish_each_hour: bool = False) -> tuple[list[tuple[str,int]], list[tuple[str,int,str]]]:
     output.mkdir(parents=True,exist_ok=True)
     good: list[tuple[str,int]] = []
     bad: list[tuple[str,int,str]] = []
@@ -208,7 +211,6 @@ def run_jobs(plan: list[tuple[str,int]], domains: str, script: Path,
                 with_qpf += 1
                 print(f'QPF CHECK {cycle} F{hour:03d}: OK '
                       '(true cumulative QPF PNG staged)', flush=True)
-            good.append((cycle, hour))
             # A full 48-hour run may contain tens of gigabytes of raw GRIB
             # downloads; the rendered PNGs are retained in site_export.
             grib_file = output / (f'{cycle[:8]}.rrfs.t{cycle[8:]}z.'
@@ -218,6 +220,15 @@ def run_jobs(plan: list[tuple[str,int]], domains: str, script: Path,
                 grib_file.unlink()
                 print(f'Cleaned raw GRIB F{hour:03d} ({size_mb:.1f} MiB); '
                       'staged PNGs retained', flush=True)
+            if publish_each_hour:
+                publisher = Path(__file__).resolve().with_name('publish_rrfs_mpas_winter.py')
+                cmd = [sys.executable, str(publisher),
+                       '--stage', str(output / 'site_export'),
+                       '--cycle', cycle, '--forecast-hour', str(hour)]
+                print(f'Publishing {cycle} F{hour:03d} to AWS S3 now...', flush=True)
+                subprocess.run(cmd, check=True)
+                print(f'PUBLISHED {cycle} F{hour:03d}: PNGs + merged manifest + runs.json', flush=True)
+            good.append((cycle, hour))
         except (subprocess.CalledProcessError, RuntimeError) as exc:
             bad.append((cycle, hour, str(exc)))
             print(f'WARNING: {cycle} F{hour:03d} failed: {exc}', flush=True)
@@ -247,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--domains', default=os.getenv('MPAS_DOMAINS', 'lbf'))
     parser.add_argument('--skip-published', action='store_true',
                         help='Read existing S3 run index; process only missing cycle/hour/domain')
+    parser.add_argument('--publish-each-hour', action='store_true',
+                        help='Upload each completed hour to S3 and update runs.json before the next hour')
     parser.add_argument('--list-only', action='store_true')
     parser.add_argument('--inventory-file', type=Path,
                         help='Optional local FTP listing fixture for offline testing')
@@ -280,12 +293,15 @@ def main(argv: list[str] | None = None) -> int:
         if not plan:
             print('No pending forecast hours. This is normal if they have all been published.')
         return 0
-    good,bad = run_jobs(plan, args.domains, args.script, args.output_dir, args.keep_going)
+    good,bad = run_jobs(plan, args.domains, args.script, args.output_dir,
+                        args.keep_going, publish_each_hour=args.publish_each_hour)
     print(f'Completed {len(good)} forecast hours; failed {len(bad)}',flush=True)
     for cycle,fhr,message in bad:
         print(f'FAILED {cycle} F{fhr:03d}: {message}',flush=True)
-    if bad and not args.keep_going:
+    if bad:
+        # Do not report a green publishing job when any selected hour failed.
+        # Already uploaded hours remain online and are not rolled back.
         return 1
-    return 0 if good or not bad else 1
+    return 0
 if __name__=='__main__':
     raise SystemExit(main())
