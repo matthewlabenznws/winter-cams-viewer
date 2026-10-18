@@ -18,6 +18,13 @@
     snow10to1: '10:1 Snowfall Estimate',
     weasd: 'Snow-Water Equivalent',
     t2m: '2-m Temperature',
+    gust10m: '10-m Wind Gusts (mph)',
+    rh2m: '2-m Relative Humidity',
+    d2m: '2-m Dewpoint (°F)',
+    wspd10m: '10-m Wind Speed (mph)',
+    rvort850: '850-mb Relative Vorticity + Heights + Winds',
+    rvort700: '700-mb Relative Vorticity + Heights + Winds',
+    rvort500: '500-mb Relative Vorticity + Heights + Winds',
     t925: '925-mb Temperature', t850: '850-mb Temperature', t700: '700-mb Temperature',
     wspd925: '925-mb Wind Speed', wspd850: '850-mb Wind Speed', wspd700: '700-mb Wind Speed',
     tadv_925mb: '925-mb Temperature Advection',
@@ -116,6 +123,10 @@
     scheduleFourPanelFit();
   }
   focusButton.addEventListener('click', () => setFocusView(!focusActive));
+
+  const LIVE_POLL_MS = 30000;
+  let lastIndexVersion = '';
+  let backgroundPollRunning = false;
 
   const manifestCache = new Map();
   // A small sliding window of PNGs makes playback smooth without keeping an
@@ -428,6 +439,104 @@
       'Published forecast maps will appear here when the first model run is available on AWS S3.');
     status(message, level);
   }
+  function validatedIndexEntries(json) {
+    if (!json || !Array.isArray(json.runs)) throw new Error('runs.json must contain a runs array');
+    const unique = new Map();
+    for (const item of json.runs) {
+      if (!item || !/^\d{10}$/.test(String(item.cycle ?? ''))) continue;
+      if (!Number.isInteger(item.forecast_hour) || item.forecast_hour <= 0 || item.forecast_hour > 120) continue;
+      if (item.manifest !== `${item.cycle}/manifest_f${String(item.forecast_hour).padStart(3, '0')}.json`) continue;
+      unique.set(item.cycle + ':' + item.forecast_hour, item);
+    }
+    return [...unique.values()].sort((a, b) => b.cycle.localeCompare(a.cycle) || a.forecast_hour - b.forecast_hour);
+  }
+
+  function indexVersion(json, entries) {
+    // updated_utc changes after *every* successful hour publication (also
+    // when an existing hour gains products/domains). The entries signature is
+    // a fallback for older indices without updated_utc.
+    return String(json.updated_utc || '') + '|' + entries.map(e =>
+      `${e.cycle}:${e.forecast_hour}:${(e.domains || []).join(',')}`).join(';');
+  }
+
+  // Light-touch live refresh: don't call refreshRuns() while a user is playing
+  // frames, because manual refresh stops animation and redraws the maps.
+  async function pollNewHours() {
+    if (backgroundPollRunning || els.refresh.disabled || document.hidden) return;
+    backgroundPollRunning = true;
+    try {
+      const response = await fetch(dataUrl('runs.json') + '?poll=' + Date.now(),
+        {cache: 'no-store'});
+      if (!response.ok) return; // Keep the current maps on transient S3 errors.
+      const json = await response.json();
+      const entries = validatedIndexEntries(json);
+      if (!entries.length) return;
+      const version = indexVersion(json, entries);
+      if (version === lastIndexVersion && state.ready) return;
+
+      if (!state.ready) {
+        // The page may have opened before the first PNG was uploaded.
+        await refreshRuns(false);
+        return;
+      }
+
+      lastIndexVersion = version;
+      const previousCycle = state.cycle;
+      const previousHour = state.hour;
+      const oldCycleOptions = [...new Set(state.entries.map(e => e.cycle))].join(',');
+      state.entries = entries;
+
+      // Invalidate cached manifests after publication. Existing PNGs remain
+      // visible until the next hour is selected; no blink or playback reset.
+      manifestCache.clear();
+      state.cacheToken = Date.now();
+      const cycles = [...new Set(entries.map(e => e.cycle))];
+      if (!cycles.includes(previousCycle)) {
+        // Very old selected runs may fall out of the retained index.
+        // Otherwise never switch a user's chosen cycle automatically.
+        if (!state.playing) {
+          await refreshRuns(true);
+        }
+        return;
+      }
+      if (cycles.join(',') !== oldCycleOptions) {
+        setSelectOptions(els.run, cycles.map(c =>
+          [c, `${c.slice(0,4)}-${c.slice(4,6)}-${c.slice(6,8)} ${c.slice(8,10)}Z`]), previousCycle);
+      }
+      renderHourControls(); // Newly uploaded hours turn blue in-place.
+
+      // Fetch the active hour again only to discover newly staged products.
+      // During animation, postpone any redraw; the next visit will use the
+      // fresh manifest. Don't overwrite a changed user selection mid-request.
+      const selected = entries.find(e => e.cycle === previousCycle && e.forecast_hour === previousHour);
+      if (selected && !state.playing) {
+        const response = await fetch(dataUrl(selected.manifest) + '?poll=' + Date.now(),
+          {cache: 'no-store'});
+        if (response.ok) {
+          const latest = await response.json();
+          if (latest.model === 'rrfs_mpas' && latest.cycle === previousCycle &&
+              latest.forecast_hour === previousHour && latest.domains) {
+            manifestCache.set(selected.manifest, latest);
+            if (state.cycle === previousCycle && state.hour === previousHour && !state.playing &&
+                JSON.stringify(latest.domains) !== JSON.stringify(state.manifest?.domains)) {
+              const serial = ++state.serial;
+              if (await showManifest(latest, serial) && serial === state.serial) {
+                state.manifest = latest;
+                syncAddress();
+              }
+            }
+          }
+        }
+      }
+      // If a newly uploaded hour appears during playback, the next animation
+      // advance reads the newest entriesForCycle() list (not a frozen list).
+    } catch (error) {
+      console.warn('Winter CAMs background refresh failed (will retry):', error);
+    } finally {
+      backgroundPollRunning = false;
+    }
+  }
+
   async function refreshRuns(preserveSelection = true) {
     stopAnimation();
     ++state.serial;
@@ -442,15 +551,8 @@
       }
       if (!response.ok) throw new Error(`S3 returned HTTP ${response.status} for runs.json`);
       const json = await response.json();
-      if (!json || !Array.isArray(json.runs)) throw new Error('runs.json must contain a runs array');
-      const unique = new Map();
-      for (const item of json.runs) {
-        if (!item || !/^\d{10}$/.test(String(item.cycle ?? ''))) continue;
-        if (!Number.isInteger(item.forecast_hour) || item.forecast_hour <= 0 || item.forecast_hour > 120) continue; // F000 intentionally disabled
-        if (item.manifest !== `${item.cycle}/manifest_f${String(item.forecast_hour).padStart(3, '0')}.json`) continue;
-        unique.set(item.cycle + ':' + item.forecast_hour, item);
-      }
-      const entries = [...unique.values()].sort((a,b) => b.cycle.localeCompare(a.cycle) || a.forecast_hour-b.forecast_hour);
+      const entries = validatedIndexEntries(json);
+      lastIndexVersion = indexVersion(json, entries);
       if (!entries.length) {
         resetForNoRuns('Website ready · No valid winter forecast hours are published yet.');
         return;
@@ -636,9 +738,7 @@
   }
 
   function startAnimation() {
-    const entries = entriesForCycle(state.cycle);
-    if (entries.length < 2) return;
-    const hours = entries.map(e => e.forecast_hour);
+    if (entriesForCycle(state.cycle).length < 2) return;
     stopAnimation();
     state.playing = true;
     const generation = state.playGeneration;
@@ -647,6 +747,10 @@
     const advance = async () => {
       if (!state.playing || generation !== state.playGeneration) return;
       state.timer = null;
+      // Read the live list each tick, so new published hours join playback
+      // without toggling Play/Pause or refreshing the page.
+      const hours = entriesForCycle(state.cycle).map(e => e.forecast_hour);
+      if (hours.length < 2) { stopAnimation(); return; }
       const idx = hours.indexOf(state.hour);
       const nextHour = hours[(idx + 1 + hours.length) % hours.length];
       // Never outrun S3: wait for the next PNG before scheduling another tick.
@@ -817,4 +921,8 @@
     }
   }
   refreshRuns(false);
+  window.setInterval(() => { void pollNewHours(); }, LIVE_POLL_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) void pollNewHours();
+  });
 })();
