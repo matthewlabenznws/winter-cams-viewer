@@ -2,14 +2,14 @@ name: RRFS-MPAS Winter | All Available Forecast Hours
 
 # Default produces LBF, Regional, and Central Plains per selected FHR.
 # Rebuild existing hours to backfill newly introduced wind-speed PNGs on S3.
-# Existing concurrency cancel-in-progress=false protects longer 00Z/12Z jobs.
-# Includes optional QPF backfill of already-published hours. Once the test succeeds,
-# uncomment the schedule below for incremental processing of new FHRs.
+# The publisher serializes runs.json updates; no running job is cancelled.
+# Hourly schedule enabled: processes incrementally and uploads each completed FHR.
+# The runner filters FTP cycles to 00/03/06/09/12/15/18/21Z only.
 on:
   workflow_dispatch:
     inputs:
       cycle:
-        description: 'AUTO = newest cycle; RECENT = backfill up to 8 cycles; or YYYYMMDDHH'
+        description: 'AUTO = newest eligible 3-hourly cycle; RECENT = previous eligible cycles; or YYYYMMDDHH'
         required: true
         default: 'AUTO'
         type: string
@@ -29,18 +29,18 @@ on:
         default: '6'
         type: string
       publish:
-        description: 'Publish completed graphics to AWS S3 (off for initial test)'
+        description: 'Publish each completed forecast hour to AWS S3'
         required: true
-        default: false
+        default: true
         type: boolean
       rebuild_existing_hours:
         description: 'When publishing, re-render hours even if their domains are already in S3 (use to repair missing QPF)'
         required: true
         default: false
         type: boolean
-  # IMPORTANT: enable only after successfully publishing a test run.
-  # schedule:
-  #   - cron: '25 * * * *'
+  # Check for newly available hours once per hour (UTC).
+  schedule:
+    - cron: '25 * * * *'
 
 permissions:
   contents: read
