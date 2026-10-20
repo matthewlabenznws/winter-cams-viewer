@@ -19,6 +19,7 @@
     weasd: 'Snow-Water Equivalent',
     t2m: '2-m Temperature',
     gust10m: '10-m Wind Gusts (mph)',
+    wspd10m: '10-m Wind Speed + MSLP (mph)',
     rh2m: '2-m Relative Humidity',
     d2m: '2-m Dewpoint (°F)',
     rvort850: '850-mb Relative Vorticity + Heights + Winds',
@@ -34,9 +35,8 @@
     fgen_700mb: '700-mb Advection + Frontogenesis',
     thickness_mslp: '1000–500-mb Thickness + MSLP'
   };
-  // Historical S3 manifests may still list this retired product.
-  // Hide it in every selector without deleting or modifying older S3 files.
-  const RETIRED_PRODUCT_IDS = new Set(['wspd10m']);
+  // Keep the history-aware filter for any future retired products.
+  const RETIRED_PRODUCT_IDS = new Set();
   const PRODUCT_ORDER = Object.keys(PRODUCT_LABELS);
   const urlParams = new URLSearchParams(location.search);
   const initial = {
@@ -73,7 +73,8 @@
     playGeneration: 0,
     serial: 0,
     cacheToken: Date.now(),
-    ready: false
+    ready: false,
+    autoFollowLatest: true
   };
   const byId = id => document.getElementById(id);
   const els = {
@@ -102,6 +103,17 @@
     viewerTitle: byId('viewerTitle'),
     fullLink: byId('fullImageLink')
   };
+  // Clicking Latest re-enables automatic following; selecting an older run
+  // manually holds that run while its forecast hours can keep arriving.
+  function updateLatestLabel() {
+    if (!els.latest) return;
+    els.latest.textContent = state.autoFollowLatest ? 'Latest (Auto)' : 'Latest (Hold)';
+    els.latest.title = state.autoFollowLatest
+      ? 'Automatically follow newly published model cycles'
+      : 'Holding manually selected run; click to follow the latest run again';
+  }
+  updateLatestLabel();
+
   // Four-panel viewing can use most of the display without cropping maps.
   // Keep the toggle in the forecast-hour controls so it remains accessible
   // when the model/product header is hidden in the larger view.
@@ -501,6 +513,24 @@
         }
         return;
       }
+      const newestCycle = cycles[0];
+      if (state.autoFollowLatest && newestCycle !== previousCycle) {
+        // Move to the newly published cycle as soon as F001+ is indexed.
+        // Older 00Z/12Z files and their hours stay in the dropdown.
+        if (state.playing) stopAnimation();
+        state.cycle = newestCycle;
+        const newlyPublished = entriesForCycle(newestCycle);
+        if (newlyPublished.length) {
+          state.hour = newlyPublished[0].forecast_hour;
+          state.manifest = null;
+          state.initializedProducts = false;
+          setSelectOptions(els.run, cycles.map(c =>
+            [c, `${c.slice(0,4)}-${c.slice(4,6)}-${c.slice(6,8)} ${c.slice(8,10)}Z`]), newestCycle);
+          renderHourControls();
+          void loadCurrent();
+        }
+        return;
+      }
       if (cycles.join(',') !== oldCycleOptions) {
         setSelectOptions(els.run, cycles.map(c =>
           [c, `${c.slice(0,4)}-${c.slice(4,6)}-${c.slice(6,8)} ${c.slice(8,10)}Z`]), previousCycle);
@@ -567,7 +597,7 @@
       manifestCache.clear();
       state.cacheToken = Date.now();
       const cycles = [...new Set(entries.map(e => e.cycle))];
-      let wantedCycle = preserveSelection ? oldCycle : (initial.cycle && cycles.includes(initial.cycle) ? initial.cycle : null);
+      let wantedCycle = preserveSelection ? (state.autoFollowLatest ? cycles[0] : oldCycle) : (initial.cycle && cycles.includes(initial.cycle) ? initial.cycle : null);
       if (!wantedCycle || !cycles.includes(wantedCycle)) wantedCycle = cycles[0];
       state.cycle = wantedCycle;
       const runEntries = entriesForCycle(state.cycle);
@@ -805,6 +835,8 @@
   els.run.addEventListener('change', () => {
     stopAnimation();
     state.cycle = els.run.value;
+    state.autoFollowLatest = false;
+    updateLatestLabel();
     const entries = entriesForCycle(state.cycle);
     state.hour = entries.length ? entries[0].forecast_hour : null;
     state.manifest = null;
@@ -828,6 +860,8 @@
   });
   els.play.addEventListener('click', () => state.playing ? stopAnimation() : startAnimation());
   els.latest.addEventListener('click', () => {
+    state.autoFollowLatest = true;
+    updateLatestLabel();
     stopAnimation();
     const latest = state.entries[0];
     if (!latest) return;
