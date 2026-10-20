@@ -2,7 +2,7 @@
 
 The existing rrfs_mpas_winter.py generates one forecast hour and writes its
 PNG files + manifest to MPAS_OUT_DIR/site_export. This orchestrator chooses
-actual available hours from the GSL FTP inventory and runs that plotting script
+actual available hours from 3-hourly GSL FTP cycles and runs that plotting script
 once per hour, accumulating all results in the same site_export directory.
 
 With --publish-each-hour, each successful hour is uploaded and indexed in S3
@@ -16,7 +16,7 @@ the GitHub runner disk with dozens of large raw files.
 Example (initial smoke test):
   python scripts/process_available_hours.py --cycle AUTO --hours 006 --max-hours 1
 
-Example (whole latest cycle, with no batch cap):
+Example (whole latest allowed 3-hourly cycle, with no batch cap):
   python scripts/process_available_hours.py --cycle AUTO --hours ALL --max-hours 0
 
 Example (incremental from recent runs, skip already-published hours):
@@ -47,6 +47,9 @@ FILE_RE = re.compile(
     r'\.testbed\.f(?P<fhr>\d{3})\.conus\.grib2$'
 )
 VALID_DOMAINS = {'lbf', 'regional', 'central_plains'}
+# Only run model cycles initialized at 00Z, 03Z, ..., 21Z.
+# Forecast lead hours remain dynamically discovered; this is NOT an FHR limit.
+ALLOWED_CYCLE_HOURS = frozenset(range(0, 24, 3))
 
 
 def list_ftp_files(email: str, retries: int = 3) -> list[str]:
@@ -69,7 +72,7 @@ def parse_inventory(names: list[str]) -> dict[str, list[int]]:
     available: dict[str, set[int]] = defaultdict(set)
     for name in names:
         match = FILE_RE.fullmatch(Path(name).name)
-        if match:
+        if match and int(match['cycle']) in ALLOWED_CYCLE_HOURS:
             available[match['date'] + match['cycle']].add(int(match['fhr']))
     return {cycle: sorted(hours) for cycle, hours in sorted(available.items(), reverse=True)}
 
@@ -114,6 +117,9 @@ def selected_cycles(inventory: dict[str,list[int]], cycle_spec: str, recent_cycl
                 if requested is None or requested.intersection(inventory[cycle])]
     if not re.fullmatch(r'\d{10}', spec):
         raise ValueError('Cycle must be AUTO, RECENT, or YYYYMMDDHH')
+    if int(spec[-2:]) not in ALLOWED_CYCLE_HOURS:
+        raise ValueError('Only 3-hourly RRFS-MPAS cycles are supported: '
+                         '00Z, 03Z, 06Z, 09Z, 12Z, 15Z, 18Z, 21Z')
     if spec not in inventory:
         raise RuntimeError(f'Selected cycle {spec} not in GSL FTP listing')
     return [spec]
@@ -164,6 +170,10 @@ def build_plan(inventory: dict[str,list[int]], cycle_spec: str,
     # Prefer the latest run; each job is bound to one fixed cycle and hour.
     for cycle in cycles:
         for fhr in inventory[cycle]:
+            # F000 is disabled in the viewer, so skip it for ALL runs.
+            # It can still be rendered for debugging if explicitly requested.
+            if fhr == 0 and (requested is None or 0 not in requested):
+                continue
             if requested is not None and fhr not in requested:
                 continue
             matched += 1
@@ -249,7 +259,8 @@ def run_jobs(plan: list[tuple[str,int]], domains: str, script: Path,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--cycle', default=os.getenv('MPAS_CYCLE', 'AUTO'))
+    parser.add_argument('--cycle', default=os.getenv('MPAS_CYCLE', 'AUTO'),
+                        help='AUTO, RECENT, or YYYYMMDDHH; only cycles 00/03/.../21Z')
     parser.add_argument('--hours', default='ALL', help='ALL, 006, 000-048, or 000,003,006')
     parser.add_argument('--recent-cycles', type=int, default=8,
                         help='How many cycles to include when --cycle RECENT')
