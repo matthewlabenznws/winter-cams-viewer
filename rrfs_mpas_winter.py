@@ -126,7 +126,7 @@ DO_SNOW_WATER_EQUIV = True # 0-F snow-water equiv (WEASD)
 DO_2M_TEMP = True
 # Additional native RRFS-MPAS surface diagnostics.
 DO_10M_GUST = True          # instantaneous GUST, converted to mph
-DO_10M_WSPD_MSLP = True    # 10-m sustained U/V speed (mph), 4-mb MSLP contours and wind barbs
+DO_10M_WSPD_MSLP = True    # 10-m sustained U/V speed (mph), 2-mb MSLP contours and wind barbs
 DO_2M_RH = True             # native 2-m RH (%)
 DO_2M_DEWPOINT = True       # native 2-m dewpoint (K -> F)
 DO_LEVEL_TEMP = True
@@ -156,7 +156,11 @@ WIND_SMOOTH_SIGMA_PIX = 5.0
 DISPLAY_SMOOTH_SIGMA_PIX = 2.0
 PLOT_STRIDE = 3               # plot every 3rd gridpoint for faster maps
 # Match the existing CAMs geography on every winter diagnostic.
-COUNTIES = True               # thin county boundaries, thicker within LBF CWA
+COUNTIES = True               # dark charcoal county boundaries, black within LBF CWA
+# Use charcoal for counties outside LBF. The CWA overlay below redraws its
+# internal county boundaries in solid black, preserving that distinction.
+COUNTY_OUTSIDE_COLOR = '#3f3f3f'
+COUNTY_OUTSIDE_LINEWIDTH = 0.45
 DRAW_CWA_OUTLINE = True       # prominent black/white NWS LBF CWA boundary
 # Supply the same site assets as your CAMs viewer in /content/assets when available.
 # Missing assets are skipped (never invent a CWA boundary or logo).
@@ -180,7 +184,7 @@ FETCH_INTERSTATE_SHAPEFILE = os.getenv('MPAS_FETCH_ROADS', '1') == '1'  # CI onl
 INTERSTATE_ROUTE_NUMBERS = ('80', '76')  # only these interstate routes, LBF domain
 INTERSTATE_COLOR = 'red'          # match original MRMS/QPF reference
 INTERSTATE_LINEWIDTH = 1.0
-INTERSTATE_LINE_ZORDER = 38       # above state lines/barbs, below heights/city text
+INTERSTATE_LINE_ZORDER = 38       # above state/county lines, below ALL weather overlays
 AUTO_MOUNT_DRIVE_FOR_INTERSTATE = Path('/content').exists()  # Colab only
 MAP_CREDIT = 'Plot created by: Matthew Labenz'
 SHOW_CITY_LABELS = True     # draw cities only on the LBF domain during testing
@@ -205,11 +209,23 @@ HL_LETTER_FONT_SIZE = 22
 HL_PRESSURE_FONT_SIZE = 13
 HL_PRESSURE_LAT_OFFSET = 0.18  # spacing for high centers
 HL_LOW_PRESSURE_LAT_OFFSET = 0.10  # bring L pressure value closer to the letter
-MSLP_LABEL_INTERVAL_HPA = 4 # draw every 2, label every 4 hPa
-THICKNESS_LABEL_INTERVAL_DAM = 12  # draw every 6, label every 12 dam
+MSLP_LABEL_INTERVAL_HPA = 4  # ALL MSLP maps: draw every 2 mb, label every 4 mb
+THICKNESS_LABEL_INTERVAL_DAM = 12  # draw every 6 dam, label every 12 dam
 CONTOUR_LABEL_SPACING = 10
-HEIGHT_CONTOUR_ZORDER = 42      # height lines over wind barbs (zorder 24)
-HEIGHT_LABEL_ZORDER = 125      # height labels above the map, below city names
+# Common map layering; the values intentionally exceed county/CWA/interstate
+# layers (29–38), regardless of the order each plotting function calls them.
+# Filled fields use zorder=2; higher values below are always in front.
+WIND_BARB_ZORDER = 70
+TEMP_CONTOUR_ZORDER = 80
+THICKNESS_CONTOUR_ZORDER = 85
+MSLP_CONTOUR_ZORDER = 95
+FGEN_CONTOUR_ZORDER = 100
+HEIGHT_CONTOUR_ZORDER = 110
+CONTOUR_LABEL_ZORDER = 160
+HEIGHT_LABEL_ZORDER = 165
+PRESSURE_CENTER_ZORDER = 180
+MAP_CREDIT_ZORDER = 245
+MAP_TITLE_ZORDER = 255
 TEMP_CONTOUR_RED = '#dc1428'  # stronger red on all nonzero isotherms
 OFFICE_LABEL_ZORDER = 250     # office name ABOVE cities, contours, labels, barbs
 CAM_STYLE_LOGO = True        # NOAA/NWS logos embedded in PNGs for all map domains
@@ -696,7 +712,7 @@ LBF_CITY_LABELS = [
 CITY_LABEL_SIZE = 8.4
 CITY_LABEL_COLOR = 'white'
 CITY_LABEL_OUTLINE = 1.8
-CITY_LABEL_ZORDER = 140     # cities stay above contours and contour labels
+CITY_LABEL_ZORDER = 200     # city names and values above contours, wind barbs and H/L centers
 CITY_LABEL_LAT_OFFSET = 0.0
 
 # Custom 2-m temperature colormap from the SPCOA page (-100 to 130 F, 1-degree bins).
@@ -1011,7 +1027,7 @@ def prepare_assets():
 
 
 def add_counties_and_states(ax):
-    """Draw the CAMs viewer's thin gray counties and black state borders.
+    """Draw dark-charcoal counties, black LBF interior counties and black state borders.
 
     The provided site shapefiles take precedence; use MetPy/Cartopy only as
     fallbacks. Return the county geometries, reused for CWA interior borders.
@@ -1025,14 +1041,14 @@ def add_counties_and_states(ax):
                 bbox=(EXTENT[0]-.3,EXTENT[2]-.3,EXTENT[1]+.3,EXTENT[3]+.3)
                 counties=list(shpreader.Reader(COUNTY_SHP_PATH,bbox=bbox).geometries())
                 ax.add_geometries(counties,crs=PLATE,facecolor='none',
-                                  edgecolor='#c4c4c4',linewidth=.35,zorder=29)
+                                  edgecolor=COUNTY_OUTSIDE_COLOR,linewidth=COUNTY_OUTSIDE_LINEWIDTH,zorder=29)
             except Exception as exc:
                 print('County shapefile unavailable:',str(exc)[:150])
         if counties is None:
             try:
                 from metpy.plots import USCOUNTIES
-                ax.add_feature(USCOUNTIES,facecolor='none',edgecolor='#c4c4c4',
-                               linewidth=.35,zorder=29)
+                ax.add_feature(USCOUNTIES,facecolor='none',edgecolor=COUNTY_OUTSIDE_COLOR,
+                               linewidth=COUNTY_OUTSIDE_LINEWIDTH,zorder=29)
             except Exception as exc:
                 print('MetPy counties missing:',str(exc)[:120])
     if Path(STATE_SHP_PATH).is_file():
@@ -1240,11 +1256,11 @@ def new_map(title, subtitle, ptype=False):
     cfg_sizes={'lbf':(14,11),'regional':(13,11),'central_plains':(13,11)}
     title_size,subtitle_size=cfg_sizes.get(DOMAIN_NAME,(13,11))
     ax.text(0.0,1.042,title,transform=ax.transAxes,ha='left',va='bottom',
-            fontsize=title_size,weight='bold',clip_on=False,zorder=50)
+            fontsize=title_size,weight='bold',clip_on=False,zorder=MAP_TITLE_ZORDER)
     ax.text(0.0,1.005,valid_title,transform=ax.transAxes,ha='left',va='bottom',
-            fontsize=subtitle_size,weight='bold',clip_on=False,zorder=50)
+            fontsize=subtitle_size,weight='bold',clip_on=False,zorder=MAP_TITLE_ZORDER)
     ax.text(1.0,1.005,init_title,transform=ax.transAxes,ha='right',va='bottom',
-            fontsize=subtitle_size,weight='bold',clip_on=False,zorder=50)
+            fontsize=subtitle_size,weight='bold',clip_on=False,zorder=MAP_TITLE_ZORDER)
 
     # Inset logo and credit duplicate the existing CAMs severe-product style.
     if CAM_STYLE_LOGO and LOGO_PATH and Path(LOGO_PATH).is_file():
@@ -1262,7 +1278,7 @@ def new_map(title, subtitle, ptype=False):
             zorder=OFFICE_LABEL_ZORDER,
             path_effects=[pe.withStroke(linewidth=2.5,foreground='white')])
     ax.text(.01,.015,MAP_CREDIT,transform=ax.transAxes,ha='left',va='bottom',
-            fontsize=9,weight='bold',color='black',zorder=55,
+            fontsize=9,weight='bold',color='black',zorder=MAP_CREDIT_ZORDER,
             path_effects=[pe.withStroke(linewidth=2.5,foreground='white')])
     return fig,ax
 
@@ -1350,7 +1366,7 @@ def shade_at_palette_limits(values, bounds):
     return np.clip(np.asarray(values, dtype=np.float64), low, high)
 
 
-def raise_contour_labels(labels, halo_width=None, zorder=100):
+def raise_contour_labels(labels, halo_width=None, zorder=CONTOUR_LABEL_ZORDER):
     """Keep contour labels over boundaries with no white halos.
 
     Height labels can override zorder to sit above wind barbs and all
@@ -1374,7 +1390,7 @@ def contours_temp(ax, lon, lat, temp_c):
         (np.arange(2, 42, 2), TEMP_CONTOUR_RED, 0.95, 'dashed')]:
         c = ax.contour(x, y, f, levels=values, colors=color,
                        linewidths=lw, linestyles=ls,
-                       transform=PLATE, zorder=21)
+                       transform=PLATE, zorder=TEMP_CONTOUR_ZORDER)
         if any(len(s) for segs in c.allsegs for s in segs):
             labels = ax.clabel(c, fontsize=6.7, fmt='%d', inline=True)
             raise_contour_labels(labels)
@@ -1408,7 +1424,7 @@ def wind_barbs(ax, lon, lat, wind):
     skip = max(16,int(min(lon.shape)/22))
     ax.barbs(lon[::skip,::skip],lat[::skip,::skip],wind['u'][::skip,::skip]*1.943844,
              wind['v'][::skip,::skip]*1.943844,transform=PLATE,length=5.2,
-             color='#242424',linewidth=.65,zorder=24)
+             color='#242424',linewidth=.65,zorder=WIND_BARB_ZORDER)
 
 
 def label_pressure_centers(ax, lat, lon, pressure_hpa):
@@ -1474,11 +1490,11 @@ def label_pressure_centers(ax, lat, lon, pressure_hpa):
                                    foreground='black')]
             ax.text(lo,la,mark,color=text_color,
                     fontsize=HL_LETTER_FONT_SIZE,weight='bold',
-                    ha='center',va='center',transform=PLATE,zorder=46,
+                    ha='center',va='center',transform=PLATE,zorder=PRESSURE_CENTER_ZORDER,
                     path_effects=outline)
             ax.text(lo,la-(HL_LOW_PRESSURE_LAT_OFFSET if mark == 'L' else HL_PRESSURE_LAT_OFFSET),f'{pres:.0f}',
                     color=text_color,fontsize=HL_PRESSURE_FONT_SIZE,
-                    weight='bold',ha='center',va='top',transform=PLATE,zorder=46,
+                    weight='bold',ha='center',va='top',transform=PLATE,zorder=PRESSURE_CENTER_ZORDER,
                     path_effects=outline)
             if len(chosen)>=MAX_HL_PER_TYPE:
                 break
@@ -1507,7 +1523,7 @@ def overlay_thickness_mslp(ax, lat, lon, fields, label_style=False):
     if tlevels.size:
         ct=ax.contour(tx,ty,th,levels=tlevels,colors='#ce1818',
                       linestyles='dashed',linewidths=1.12,
-                      transform=PLATE,zorder=17)
+                      transform=PLATE,zorder=THICKNESS_CONTOUR_ZORDER)
         label_levels=[lev for lev in tlevels
                       if lev%THICKNESS_LABEL_INTERVAL_DAM==0]
         if label_levels and any(len(x) for segs in ct.allsegs for x in segs):
@@ -1522,7 +1538,7 @@ def overlay_thickness_mslp(ax, lat, lon, fields, label_style=False):
     levels=np.arange(m0,m1+step,step)
     if len(levels)>1:
         cp=ax.contour(tx,ty,ps,levels=levels,colors='#0f0f0f',
-                      linewidths=1.16,transform=PLATE,zorder=19)
+                      linewidths=1.16,transform=PLATE,zorder=MSLP_CONTOUR_ZORDER)
         label_levels=[lev for lev in levels if lev%MSLP_LABEL_INTERVAL_HPA==0]
         if label_levels and any(len(x) for segs in cp.allsegs for x in segs):
             labels=ax.clabel(cp,levels=label_levels,fontsize=8.1,fmt='%d',
@@ -1533,7 +1549,7 @@ def overlay_thickness_mslp(ax, lat, lon, fields, label_style=False):
     if label_style:
         ax.text(.02,.055,'MSLP: 2-hPa black contours  |  Thickness: 6-dam red dashed',
                 transform=ax.transAxes,fontsize=8.2,ha='left',va='bottom',
-                zorder=43,bbox=dict(facecolor='white',alpha=.85,edgecolor='none'))
+                zorder=CONTOUR_LABEL_ZORDER,bbox=dict(facecolor='white',alpha=.85,edgecolor='none'))
     return True
 
 
@@ -1812,7 +1828,7 @@ def plot_fgen(lat,lon,diag,level,cycle_id,fields):
     # Frontogenesis = positive signed intensification; plot only positive.
     _,_,fg=mesh_values(lon,lat,fgen)
     c=ax.contour(x,y,fg,levels=FGEN_CONTOURS,
-                 colors='#07631e',linewidths=1.7,transform=PLATE,zorder=25)
+                 colors='#07631e',linewidths=1.7,transform=PLATE,zorder=FGEN_CONTOUR_ZORDER)
     if any(len(s) for segs in c.allsegs for s in segs):
         labels=ax.clabel(c,fontsize=8,fmt='%g',inline=True)
         raise_contour_labels(labels,halo_width=2.0)
@@ -1942,7 +1958,7 @@ def plot_10m_sustained_wind_mslp(lat, lon, fields, cycle_id):
     """Native sustained 10-m wind speed, MSLP and earth-relative wind barbs.
 
     Use the 10-m U/V vector magnitude (not GUST) converted to mph. Pressure
-    contours are every 4 mb and preserve the existing 1009-mb L criterion.
+    contours are every 2 mb and preserve the existing 1009-mb L criterion.
     No numerical mph city values are drawn, to avoid contour/barb clutter.
     """
     required = ('u10m', 'v10m', 'mslp')
@@ -1964,19 +1980,21 @@ def plot_10m_sustained_wind_mslp(lat, lon, fields, cycle_id):
                      levels=WSPD10M_BOUNDS, cmap=WSPD10M_CMAP,
                      norm=WSPD10M_NORM, transform=PLATE, zorder=2)
 
-    # Black MSLP isobars every 4 hPa with black labels (no thickness lines).
+    # Black MSLP contours every 2 hPa; label every 4 hPa for legibility.
+    # Share the same contour/label spacing settings as the P-type MSLP overlays.
     _, _, ps = mesh_values(lon, lat, smooth(p_hpa, 4.0))
     if np.isfinite(ps).any():
-        step = 4
+        step = MSLP_CONTOUR_INTERVAL_HPA
         pmin = int(np.floor(np.nanmin(ps) / step) * step)
         pmax = int(np.ceil(np.nanmax(ps) / step) * step)
         levels = np.arange(pmin, pmax + step, step)
         if len(levels) > 1:
             cp = ax.contour(x, y, ps, levels=levels, colors='#141414',
-                            linewidths=1.05, transform=PLATE, zorder=33)
-            if any(len(segment) for group in cp.allsegs for segment in group):
-                labels = ax.clabel(cp, fontsize=8, fmt='%d', inline=True,
-                                   inline_spacing=CONTOUR_LABEL_SPACING)
+                            linewidths=1.05, transform=PLATE, zorder=MSLP_CONTOUR_ZORDER)
+            label_levels = [lev for lev in levels if lev % MSLP_LABEL_INTERVAL_HPA == 0]
+            if label_levels and any(len(segment) for group in cp.allsegs for segment in group):
+                labels = ax.clabel(cp, levels=label_levels, fontsize=8, fmt='%d',
+                                   inline=True, inline_spacing=CONTOUR_LABEL_SPACING)
                 raise_contour_labels(labels, zorder=HEIGHT_LABEL_ZORDER)
     wind_barbs(ax, lon, lat, {'u': u, 'v': v})  # barbs in knots; gust map has none
     label_pressure_centers(ax, lat, lon, p_hpa)
