@@ -16,6 +16,7 @@ Products: 1-km/composite reflectivity + P-type, cumulative 0–F QPF, 2-m temper
 925/850/700-mb shaded temperature + black heights/barbs (no isotherms),
 wind speed + heights/barbs, shaded 850/700/500-mb relative vorticity
 with geopotential height contours and earth-relative wind barbs; native surface gusts without barbs,
+10-m sustained wind speed + MSLP with earth-relative wind barbs,
 2-m RH and dewpoint, combined temperature advection/frontogenesis (no advection-only map),
 optional native accumulated snowfall, a separate 10:1 SWE-based snowfall
 estimate, and snow-water equivalent; LBF city labels and values.
@@ -125,6 +126,7 @@ DO_SNOW_WATER_EQUIV = True # 0-F snow-water equiv (WEASD)
 DO_2M_TEMP = True
 # Additional native RRFS-MPAS surface diagnostics.
 DO_10M_GUST = True          # instantaneous GUST, converted to mph
+DO_10M_WSPD_MSLP = True    # 10-m sustained U/V speed (mph), 4-mb MSLP contours and wind barbs
 DO_2M_RH = True             # native 2-m RH (%)
 DO_2M_DEWPOINT = True       # native 2-m dewpoint (K -> F)
 DO_LEVEL_TEMP = True
@@ -316,6 +318,8 @@ def field_definitions(fhr: int):
         # Native RRFS-MPAS surface fields confirmed in the F001/F006/F024
         # GSL inventory (GRIB2 identifiers, not ecCodes short names).
         'gust10m': lambda k: k[:3] == (0, 2, 22) and k[3] == 'surface' and k[5] == 'instant',
+        'u10m': lambda k: k[:3] == (0, 2, 2) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
+        'v10m': lambda k: k[:3] == (0, 2, 3) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
         'rh2m': lambda k: k[:3] == (0, 1, 1) and k[3:5] == ('heightAboveGround', 2) and k[5] == 'instant',
         'd2m': lambda k: k[:3] == (0, 0, 6) and k[3:5] == ('heightAboveGround', 2) and k[5] == 'instant',
         'mslp':   lambda k: k[:3] == (0, 3, 198) and k[3] == 'meanSea' and k[5] == 'instant',
@@ -381,7 +385,7 @@ def read_selected_fields(grib_path: Path, fhr: int):
                     missing_value = float(meta(gid, 'missingValue', 9.999e20))
                     arr[~np.isfinite(arr) | np.isclose(arr, missing_value, rtol=0, atol=0)] = np.nan
                     fields[label] = arr
-                    if label[0] in ('u', 'v') and label[1:].isdigit():
+                    if (label[0] in ('u', 'v') and label[1:].isdigit()) or label in ('u10m', 'v10m'):
                         # ecCodes: 1=grid-relative, 0=earth-relative.
                         # Do not default missing metadata to 0 (unsafe).
                         uv_flags[label] = int(meta(gid, 'uvRelativeToGrid', -1))
@@ -443,6 +447,8 @@ def rotate_winds_to_earth(lat, lon, fields, uv_flags, wind_grid_meta):
 
     wind_levels = tuple(dict.fromkeys(LEVELS_HPA + VORTICITY_LEVELS_HPA))
     wind_pairs = [(f'u{lev}', f'v{lev}') for lev in wind_levels]
+    if DO_10M_WSPD_MSLP:
+        wind_pairs.append(('u10m', 'v10m'))
     for uk, vk in wind_pairs:
         if uk in fields and vk in fields:
             if uk not in uv_flags or vk not in uv_flags or uv_flags[uk] != uv_flags[vk]:
@@ -757,6 +763,23 @@ VORTICITY_NORM = colors.BoundaryNorm(VORTICITY_BOUNDS, VORTICITY_CMAP.N, clip=Fa
 VORTICITY_TICKS = np.arange(-40, 51, 10)
 VORTICITY_WIND_SMOOTH_SIGMA = 3.0  # smooth vectors BEFORE spatial derivatives
 VORTICITY_DISPLAY_SMOOTH_SIGMA = 1.0  # additional display-only vorticity smoothing
+
+# Exact user-supplied 10-m sustained-wind colors: 52 swatches.
+# 9..60 inclusive supplies 51 intervals; extend the top edge to 61 mph
+# so all 52 swatches retain their intended 1-mph bins. Tick labels stop at 60.
+WSPD10M_BOUNDS = np.arange(9., 62., 1.)
+WSPD10M_COLORS = [
+    '#fefefe', '#f1f8ff', '#daedfd', '#c3e3fc', '#abd9fa', '#95cff9', '#8ab6ef', '#819ae4', '#797ed9', '#7062cf',
+    '#8064cd', '#9c72d1', '#b781d6', '#d490d9', '#de91d7', '#d682d0', '#cf74c9', '#c867c2', '#c057ba', '#b648b0',
+    '#ad38a7', '#a3289d', '#9d1d91', '#a51c77', '#ae1c5e', '#b61c45', '#c01c2e', '#c52133', '#c92637', '#cd2c3b',
+    '#d23340', '#d73b45', '#dc4349', '#e14b4e', '#e55452', '#e96f58', '#ec935d', '#f0b863', '#f4de69', '#f2eb67',
+    '#ebdf61', '#e4d35a', '#ddc753', '#d5bb4c', '#cdaf44', '#c6a33d', '#bf9737', '#b88c30', '#b18029', '#a97422',
+    '#a2681c', '#9b5c17',
+]
+assert len(WSPD10M_COLORS) == len(WSPD10M_BOUNDS) - 1, '10-m sustained speed bins mismatch'
+WSPD10M_CMAP = colors.ListedColormap(WSPD10M_COLORS, name='10mwinds_bins')
+WSPD10M_NORM = colors.BoundaryNorm(WSPD10M_BOUNDS, WSPD10M_CMAP.N, clip=True)
+WSPD10M_TICKS = np.arange(10, 61, 5)
 
 # Custom gust palette: 15–75 mph, 60 one-mph bins.
 # The supplied 59-color palette ended at 74 mph; repeat the last swatch
@@ -1266,6 +1289,8 @@ def finish(fig, ax, fname, label=None, cf=None, colorbar_extend=None):
             apply_colorbar_ticks(cb, WSPD_TICKS, fontsize=8)
         elif label and 'Relative Vorticity' in label:
             apply_colorbar_ticks(cb, VORTICITY_TICKS, fontsize=8)
+        elif label == '10-m Wind Speed (mph)':
+            apply_colorbar_ticks(cb, WSPD10M_TICKS, fontsize=8)
         elif label == '10-m Wind Gust (mph)':
             apply_colorbar_ticks(cb, GUST10M_TICKS, fontsize=8)
         elif label == '2-m Relative Humidity (%)':
@@ -1911,6 +1936,55 @@ def plot_10m_gust(lat, lon, fields, cycle_id):
     finish(fig,ax,filename,'10-m Wind Gust (mph)',cf)
     return filename
 
+
+
+def plot_10m_sustained_wind_mslp(lat, lon, fields, cycle_id):
+    """Native sustained 10-m wind speed, MSLP and earth-relative wind barbs.
+
+    Use the 10-m U/V vector magnitude (not GUST) converted to mph. Pressure
+    contours are every 4 mb and preserve the existing 1009-mb L criterion.
+    No numerical mph city values are drawn, to avoid contour/barb clutter.
+    """
+    required = ('u10m', 'v10m', 'mslp')
+    missing = [key for key in required if key not in fields]
+    if missing:
+        print('Skipping 10-m sustained winds + MSLP; missing', missing)
+        return None
+    u = np.asarray(fields['u10m'], float)
+    v = np.asarray(fields['v10m'], float)
+    speed_mph = np.hypot(u, v) * 2.2369362921
+    p_hpa = np.asarray(fields['mslp'], float) / 100.0
+    if not (np.isfinite(speed_mph).any() and np.isfinite(p_hpa).any()):
+        print('Skipping 10-m sustained winds + MSLP: no finite data')
+        return None
+
+    fig, ax = new_map('RRFS-MPAS | 10-m Wind Speed + MSLP', title_info(cycle_id))
+    x, y, z = mesh_values(lon, lat, smooth(speed_mph, 1.0))
+    cf = ax.contourf(x, y, shade_at_palette_limits(z, WSPD10M_BOUNDS),
+                     levels=WSPD10M_BOUNDS, cmap=WSPD10M_CMAP,
+                     norm=WSPD10M_NORM, transform=PLATE, zorder=2)
+
+    # Black MSLP isobars every 4 hPa with black labels (no thickness lines).
+    _, _, ps = mesh_values(lon, lat, smooth(p_hpa, 4.0))
+    if np.isfinite(ps).any():
+        step = 4
+        pmin = int(np.floor(np.nanmin(ps) / step) * step)
+        pmax = int(np.ceil(np.nanmax(ps) / step) * step)
+        levels = np.arange(pmin, pmax + step, step)
+        if len(levels) > 1:
+            cp = ax.contour(x, y, ps, levels=levels, colors='#141414',
+                            linewidths=1.05, transform=PLATE, zorder=33)
+            if any(len(segment) for group in cp.allsegs for segment in group):
+                labels = ax.clabel(cp, fontsize=8, fmt='%d', inline=True,
+                                   inline_spacing=CONTOUR_LABEL_SPACING)
+                raise_contour_labels(labels, zorder=HEIGHT_LABEL_ZORDER)
+    wind_barbs(ax, lon, lat, {'u': u, 'v': v})  # barbs in knots; gust map has none
+    label_pressure_centers(ax, lat, lon, p_hpa)
+
+    filename = f'rrfs_mpas_wspd10m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    finish(fig, ax, filename, label='10-m Wind Speed (mph)', cf=cf)
+    return filename
+
 def plot_2m_rh(lat, lon, fields, cycle_id):
     """Native instantaneous 2-m RH; no humidity reconstruction needed."""
     if 'rh2m' not in fields:
@@ -2135,6 +2209,8 @@ def run():
             add(plot_2m_temperature(lat,lon,fields,cycle_id))
         if DO_10M_GUST:
             add(plot_10m_gust(lat,lon,fields,cycle_id))
+        if DO_10M_WSPD_MSLP:
+            add(plot_10m_sustained_wind_mslp(lat,lon,fields,cycle_id))
         if DO_2M_RH:
             add(plot_2m_rh(lat,lon,fields,cycle_id))
         if DO_2M_DEWPOINT:
