@@ -1,5 +1,8 @@
 name: RRFS-MPAS Winter | All Available Forecast Hours
 
+# Default produces LBF, Regional, and Central Plains per selected FHR.
+# Rebuild existing hours to backfill newly introduced wind-speed PNGs on S3.
+# Existing concurrency cancel-in-progress=false protects longer 00Z/12Z jobs.
 # Includes optional QPF backfill of already-published hours. Once the test succeeds,
 # uncomment the schedule below for incremental processing of new FHRs.
 on:
@@ -16,9 +19,9 @@ on:
         default: 'ALL'
         type: string
       domains:
-        description: 'lbf,regional,central_plains (comma separated)'
+        description: 'All three by default: lbf,regional,central_plains (comma separated)'
         required: true
-        default: 'lbf'
+        default: 'lbf,regional,central_plains'
         type: string
       max_hours:
         description: 'Maximum forecast hours to process per run (0 = ALL without limit)'
