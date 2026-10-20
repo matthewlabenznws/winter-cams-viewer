@@ -192,7 +192,7 @@ SHOW_LBF_CITY_VALUES = True
 CITY_VALUE_LAYERS = {
     'qpf': True, 't2m': True, 'asnow': True, 'snow10to1': True, 'weasd': True,
     'pressure_temp': True, 'pressure_wind': False,
-    'gust10m': True, 'rh2m': True, 'd2m': True,
+    'gust10m': True, 'wspd10m': True, 'rh2m': True, 'd2m': True,
 }
 CITY_VALUE_OFFSET_DEG = 0.095     # position value a little closer to city name
 CITY_MAX_SAMPLE_DISTANCE_KM = 20.0
@@ -1959,7 +1959,7 @@ def plot_10m_sustained_wind_mslp(lat, lon, fields, cycle_id):
 
     Use the 10-m U/V vector magnitude (not GUST) converted to mph. Pressure
     contours are every 2 mb and preserve the existing 1009-mb L criterion.
-    No numerical mph city values are drawn, to avoid contour/barb clutter.
+    Whole-mph city values are labeled over LBF city names.
     """
     required = ('u10m', 'v10m', 'mslp')
     missing = [key for key in required if key not in fields]
@@ -1998,6 +1998,9 @@ def plot_10m_sustained_wind_mslp(lat, lon, fields, cycle_id):
                 raise_contour_labels(labels, zorder=HEIGHT_LABEL_ZORDER)
     wind_barbs(ax, lon, lat, {'u': u, 'v': v})  # barbs in knots; gust map has none
     label_pressure_centers(ax, lat, lon, p_hpa)
+    # LBF city wind-speed values (not gusts), whole mph, above contours and barbs.
+    add_lbf_city_values(ax, lat, lon, speed_mph, 'wspd10m',
+                        lambda value: f'{value:.0f} mph')
 
     filename = f'rrfs_mpas_wspd10m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig, ax, filename, label='10-m Wind Speed (mph)', cf=cf)
