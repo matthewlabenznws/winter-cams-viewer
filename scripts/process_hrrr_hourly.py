@@ -36,6 +36,11 @@ import time
 from typing import Any
 
 BASE = Path(__file__).resolve().parents[1]
+# When invoked as `python scripts/process_hrrr_hourly.py`, Python adds the
+# scripts/ directory, not the GitHub repository root, to sys.path. Make
+# `from scripts.herbie_hrrr_fetch import ...` work in GitHub Actions and CLI.
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))
 PREFIX = 'runs/cams/hrrr/winter'
 SOURCE_BUCKET = 'noaa-hrrr-bdp-pds'
 SOURCE_REGION = 'us-east-1'
@@ -436,6 +441,9 @@ def main(argv=None) -> int:
         return 1
     return 0
 
+
+if __name__ == '__main__':
+    sys.exit(main())
 
 if __name__ == '__main__':
     sys.exit(main())
