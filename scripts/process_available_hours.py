@@ -19,9 +19,10 @@ Example (initial smoke test):
 Example (whole latest allowed 3-hourly cycle, with no batch cap):
   python scripts/process_available_hours.py --cycle AUTO --hours ALL --max-hours 0
 
-Example (incremental from recent runs, skip already-published hours):
-  python scripts/process_available_hours.py --cycle RECENT --recent-cycles 8 \\
-    --hours ALL --max-hours 6 --skip-published
+Example (cron-job.org dispatched queue prioritizing complete 00Z/12Z runs):
+  python scripts/process_available_hours.py --cycle PRIORITY --hours ALL \\
+    --max-hours 0 --max-wall-minutes 240 --lookback-hours 96 \\
+    --skip-published --publish-each-hour
 
 Use --list-only to inspect the plan without downloads or plotting.
 """
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from ftplib import FTP
 import json
 import os
@@ -101,7 +103,8 @@ def parse_requested_hours(spec: str) -> set[int] | None:
 
 
 def selected_cycles(inventory: dict[str,list[int]], cycle_spec: str, recent_cycles: int,
-                    requested: set[int] | None = None) -> list[str]:
+                    requested: set[int] | None = None,
+                    lookback_hours: int = 96) -> list[str]:
     if not inventory:
         raise RuntimeError('No RRFS-MPAS testbed files found in GSL FTP listing')
     spec = cycle_spec.upper().strip()
@@ -112,11 +115,20 @@ def selected_cycles(inventory: dict[str,list[int]], cycle_spec: str, recent_cycl
             if requested is None or requested.intersection(hours):
                 return [cycle]
         raise RuntimeError('No GSL cycle contains the requested forecast hour(s)')
+    if spec == 'PRIORITY':
+        # Restrict the automatic queue to the most recent available model cycles,
+        # but retain older unfinished 00/12Z runs for several days. The reference
+        # is the newest *model cycle*, not when each delayed FTP file arrived.
+        newest = datetime.strptime(max(inventory), '%Y%m%d%H').replace(tzinfo=timezone.utc)
+        cutoff = newest - timedelta(hours=lookback_hours)
+        return [cyc for cyc, hours in inventory.items()
+                if datetime.strptime(cyc, '%Y%m%d%H').replace(tzinfo=timezone.utc) >= cutoff
+                and (requested is None or requested.intersection(hours))]
     if spec == 'RECENT':
         return [cycle for cycle in list(inventory)[:recent_cycles]
                 if requested is None or requested.intersection(inventory[cycle])]
     if not re.fullmatch(r'\d{10}', spec):
-        raise ValueError('Cycle must be AUTO, RECENT, or YYYYMMDDHH')
+        raise ValueError('Cycle must be AUTO, PRIORITY, RECENT, or YYYYMMDDHH')
     if int(spec[-2:]) not in ALLOWED_CYCLE_HOURS:
         raise ValueError('Only 3-hourly RRFS-MPAS cycles are supported: '
                          '00Z, 03Z, 06Z, 09Z, 12Z, 15Z, 18Z, 21Z')
@@ -162,16 +174,18 @@ def get_s3_index() -> dict[str, Any]:
 def build_plan(inventory: dict[str,list[int]], cycle_spec: str,
                requested: set[int] | None, recent_cycles: int,
                max_hours: int, already: dict[tuple[str,int],set[str]],
-               domains: set[str]) -> tuple[list[tuple[str,int]],int,int]:
-    cycles = selected_cycles(inventory, cycle_spec, recent_cycles, requested)
+               domains: set[str], lookback_hours: int = 96
+               ) -> tuple[list[tuple[str,int]], int, int]:
+    cycles = selected_cycles(inventory, cycle_spec, recent_cycles, requested,
+                             lookback_hours=lookback_hours)
     jobs: list[tuple[str,int]] = []
     matched = 0
     skipped = 0
-    # Prefer the latest run; each job is bound to one fixed cycle and hour.
+    long_pending: list[tuple[str,int]] = []
+    short_pending: list[tuple[str,int]] = []
     for cycle in cycles:
         for fhr in inventory[cycle]:
-            # F000 is disabled in the viewer, so skip it for ALL runs.
-            # It can still be rendered for debugging if explicitly requested.
+            # F000 is disabled in the viewer: only render it if explicitly requested.
             if fhr == 0 and (requested is None or 0 not in requested):
                 continue
             if requested is not None and fhr not in requested:
@@ -180,20 +194,48 @@ def build_plan(inventory: dict[str,list[int]], cycle_spec: str,
             if domains.issubset(already.get((cycle, fhr), set())):
                 skipped += 1
                 continue
-            jobs.append((cycle, fhr))
+            if cycle_spec.upper().strip() == 'PRIORITY':
+                (long_pending if cycle.endswith(('00', '12')) else short_pending).append((cycle, fhr))
+            else:
+                jobs.append((cycle, fhr))
+
+    if cycle_spec.upper().strip() == 'PRIORITY':
+        # Finish the *oldest incomplete long runs* before more recent ones; their
+        # FTP files can disappear sooner. Reserve one of each five slots for
+        # shorter cycles so the site still receives new 03/06/09/15/18/21Z data.
+        long_pending.sort(key=lambda pair: (pair[0], pair[1]))
+        short_pending.sort(key=lambda pair: (pair[0], -pair[1]), reverse=True)
+        i = j = 0
+        while i < len(long_pending) or j < len(short_pending):
+            for _ in range(4):
+                if i < len(long_pending):
+                    jobs.append(long_pending[i]); i += 1
+            if j < len(short_pending):
+                jobs.append(short_pending[j]); j += 1
+            # If one queue is empty, the other fills the entire schedule.
     if requested is not None and matched == 0:
         raise RuntimeError('No requested forecast hours are available on GSL FTP')
     return (jobs[:max_hours] if max_hours else jobs), matched, skipped
 
 
 def run_jobs(plan: list[tuple[str,int]], domains: str, script: Path,
-             output: Path, keep_going: bool, publish_each_hour: bool = False) -> tuple[list[tuple[str,int]], list[tuple[str,int,str]]]:
+             output: Path, keep_going: bool, publish_each_hour: bool = False,
+             max_wall_minutes: int = 0) -> tuple[list[tuple[str,int]], list[tuple[str,int,str]]]:
     output.mkdir(parents=True,exist_ok=True)
     good: list[tuple[str,int]] = []
     bad: list[tuple[str,int,str]] = []
     missing_qpf: list[tuple[str,int,list[str]]] = []
     with_qpf = 0
+    started = time.monotonic()
+    stopped_for_time_budget = False
     for i, (cycle, hour) in enumerate(plan, start=1):
+        # Stop BETWEEN full hours so a GRIB/plot/upload isn't deliberately
+        # interrupted mid-hour. The next scheduled run resumes from AWS S3.
+        if max_wall_minutes and time.monotonic() - started >= 60 * max_wall_minutes:
+            stopped_for_time_budget = True
+            print(f'TIME BUDGET: stopped after {i - 1} forecast hours; '
+                  'unpublished hours will be retried next scheduled run.', flush=True)
+            break
         print(f'\n========== Hour {i}/{len(plan)}: {cycle} F{hour:03d} ==========', flush=True)
         env = dict(os.environ,
                    MPAS_CYCLE=cycle,
@@ -244,6 +286,9 @@ def run_jobs(plan: list[tuple[str,int]], domains: str, script: Path,
             print(f'WARNING: {cycle} F{hour:03d} failed: {exc}', flush=True)
             if not keep_going:
                 break
+    if stopped_for_time_budget:
+        print('Safe checkpoint: every completed forecast hour was published separately '
+              'when --publish-each-hour is set.', flush=True)
     print(f'\nQPF SUMMARY: {with_qpf} hour(s) with QPF; '
           f'{len(missing_qpf)} forecast hour(s) missing QPF (excluding F000).',
           flush=True)
@@ -260,13 +305,17 @@ def run_jobs(plan: list[tuple[str,int]], domains: str, script: Path,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cycle', default=os.getenv('MPAS_CYCLE', 'AUTO'),
-                        help='AUTO, RECENT, or YYYYMMDDHH; only cycles 00/03/.../21Z')
+                        help='AUTO, PRIORITY, RECENT, or YYYYMMDDHH; only cycles 00/03/.../21Z')
     parser.add_argument('--hours', default='ALL', help='ALL, 006, 000-048, or 000,003,006')
     parser.add_argument('--recent-cycles', type=int, default=8,
                         help='How many cycles to include when --cycle RECENT')
-    parser.add_argument('--max-hours', type=int, default=6,
-                        help='Limit hours per workflow run; 0 = all available')
-    parser.add_argument('--domains', default=os.getenv('MPAS_DOMAINS', 'lbf'))
+    parser.add_argument('--max-hours', type=int, default=0,
+                        help='Limit forecast hours per workflow run; 0 (default) = unlimited by count; wall-time budget is separate')
+    parser.add_argument('--max-wall-minutes', type=int, default=0,
+                        help='Stop between forecast hours after this many minutes; 0 = unlimited')
+    parser.add_argument('--lookback-hours', type=int, default=96,
+                        help='PRIORITY queue: include past N hours of cycles (default 96)')
+    parser.add_argument('--domains', default=os.getenv('MPAS_DOMAINS', 'lbf,regional,central_plains'))
     parser.add_argument('--skip-published', action='store_true',
                         help='Read existing S3 run index; process only missing cycle/hour/domain')
     parser.add_argument('--publish-each-hour', action='store_true',
@@ -280,8 +329,10 @@ def main(argv: list[str] | None = None) -> int:
                         default=Path(os.getenv('MPAS_OUT_DIR', './rrfs_mpas_winter_output')))
     parser.add_argument('--script', type=Path, default=Path('rrfs_mpas_winter.py'))
     args = parser.parse_args(argv)
-    if args.max_hours < 0 or args.recent_cycles < 1:
-        parser.error('--max-hours must be >= 0 and --recent-cycles must be >= 1')
+    if (args.max_hours < 0 or args.recent_cycles < 1 or
+            args.max_wall_minutes < 0 or args.lookback_hours < 1):
+        parser.error('--max-hours >= 0, --max-wall-minutes >= 0, '
+                     '--lookback-hours >= 1, --recent-cycles >= 1 are required')
     domains = {item.strip() for item in args.domains.split(',') if item.strip()}
     if not domains or not domains.issubset(VALID_DOMAINS):
         parser.error('Invalid --domains (use lbf,regional,central_plains)')
@@ -294,9 +345,21 @@ def main(argv: list[str] | None = None) -> int:
     print('Discovered cycles and file counts:',
           ', '.join(f'{cycle} ({len(hours)} hours)' for cycle,hours in list(inventory.items())[:12]),flush=True)
     already = published_domains(get_s3_index()) if args.skip_published else {}
+    if args.cycle.upper().strip() == 'PRIORITY':
+        print('00Z/12Z STATUS: Published counts are for hours CURRENTLY visible '
+              'in the FTP inventory, not a guarantee that a cycle is finished:', flush=True)
+        selected = selected_cycles(inventory, 'PRIORITY', args.recent_cycles,
+                                   requested, lookback_hours=args.lookback_hours)
+        for cyc in sorted((c for c in selected if c.endswith(('00', '12')))):
+            hours = [h for h in inventory[cyc] if h != 0 and
+                     (requested is None or h in requested)]
+            published = sum(domains.issubset(already.get((cyc, h), set())) for h in hours)
+            if hours:
+                print(f'  {cyc} | published {published}/{len(hours)} available FHRs '
+                      f'| highest FTP F{max(hours):03d}', flush=True)
     plan, matched, skipped = build_plan(
         inventory, args.cycle, requested, args.recent_cycles,
-        args.max_hours, already, domains)
+        args.max_hours, already, domains, lookback_hours=args.lookback_hours)
     print(f'FTP hours matching selection: {matched}; already published for domains: {skipped};'
           f' selected this run: {len(plan)}',flush=True)
     print('Selected:', ', '.join(f'{cycle} F{hour:03d}' for cycle,hour in plan) or '(none)',flush=True)
@@ -305,7 +368,8 @@ def main(argv: list[str] | None = None) -> int:
             print('No pending forecast hours. This is normal if they have all been published.')
         return 0
     good,bad = run_jobs(plan, args.domains, args.script, args.output_dir,
-                        args.keep_going, publish_each_hour=args.publish_each_hour)
+                        args.keep_going, publish_each_hour=args.publish_each_hour,
+                        max_wall_minutes=args.max_wall_minutes)
     print(f'Completed {len(good)} forecast hours; failed {len(bad)}',flush=True)
     for cycle,fhr,message in bad:
         print(f'FAILED {cycle} F{fhr:03d}: {message}',flush=True)
@@ -314,5 +378,7 @@ def main(argv: list[str] | None = None) -> int:
         # Already uploaded hours remain online and are not rolled back.
         return 1
     return 0
+if __name__=='__main__':
+    raise SystemExit(main())
 if __name__=='__main__':
     raise SystemExit(main())
