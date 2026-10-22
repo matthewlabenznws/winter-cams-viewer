@@ -1,0 +1,161 @@
+name: HRRR Winter | Hourly Cycles
+
+# No GitHub cron: cron-job.org will use workflow_dispatch once each hour.
+# First run manually with PUBLISH=false. After inspecting maps, enable ONE
+# cron-job.org task at :55 UTC each hour with only {"ref":"main"} as body.
+# Sequential workflow queue: this prevents S3 index races and avoids cancelling
+# pending runs if processing takes longer than expected.
+on:
+  workflow_dispatch:
+    inputs:
+      cycle:
+        description: 'AUTO = newest available cycle for testing; PRIORITY = all 00Z-23Z cycles with long-run priority; or YYYYMMDDHH'
+        type: string
+        required: true
+        default: 'PRIORITY'
+      forecast_hours:
+        description: 'ALL = all published available forecast hours; or 006 / 006-012'
+        type: string
+        required: true
+        default: 'ALL'
+      max_hours:
+        description: 'Maximum completed forecast hours per run (0 = no count cap)'
+        type: string
+        required: true
+        default: '0'
+      time_budget_minutes:
+        description: 'Stop between forecast hours near this runtime; next cron run resumes from S3'
+        type: string
+        required: true
+        default: '45'
+      idle_wait_minutes:
+        description: 'Maximum minutes to poll when waiting for new forecast-hour files'
+        type: string
+        required: true
+        default: '15'
+      poll_seconds:
+        description: 'Seconds between checks for the next missing forecast hour'
+        type: string
+        required: true
+        default: '90'
+      lookback_hours:
+        description: 'How far back to search for unfinished hourly model cycles'
+        type: string
+        required: true
+        default: '96'
+      domains:
+        description: 'One or more: lbf,regional,central_plains'
+        type: string
+        required: true
+        default: 'lbf,regional,central_plains'
+      publish:
+        description: 'Upload each completed forecast hour to AWS S3'
+        type: boolean
+        required: true
+        default: true
+      rebuild_existing_hours:
+        description: 'Rerender previously published hours (for fixes/backfills)'
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+concurrency:
+  # Serialize HRRR S3 index read/merge/write. This group is independent
+  # from RRFS-MPAS, and running jobs will never be cancelled by new cron events.
+  group: hrrr-winter-hourly-s3-publisher
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    env:
+      PYTHONUNBUFFERED: '1'
+      MPLBACKEND: Agg
+      WINTER_OUT_DIR: ${{ github.workspace }}/hrrr_winter_output
+      WINTER_ASSET_DIR: ${{ github.workspace }}/assets
+      WINTER_FETCH_ROADS: '1'
+      WINTER_REQUIRE_MAP_ASSETS: '1'
+      AWS_BUCKET: ${{ secrets.AWS_BUCKET }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout severe-CAMs map assets (read-only)
+        uses: actions/checkout@v4
+        with:
+          repository: matthewlabenznws/nwslbf-severewx-model-viewer
+          ref: main
+          path: severe_assets
+          sparse-checkout: |
+            assets
+
+      - name: Stage existing CWA/state/county/road assets
+        shell: bash
+        run: |
+          python - <<'PYASSETS'
+          from pathlib import Path
+          from shutil import copy2
+          source=Path('severe_assets/assets')
+          target=Path('assets'); target.mkdir(exist_ok=True)
+          if not source.is_dir():raise FileNotFoundError(source)
+          names={'NOAANWSLogos.png','c_18mr25','w_16ap26',
+                 'cb_2018_us_county_500k','cb_2018_us_state_500k',
+                 'tl_2023_us_primaryroads'}
+          for f in source.rglob('*'):
+            if f.is_file() and f.suffix.lower() in {'.zip','.shp','.shx','.dbf','.prj','.cpg','.png'} and (f.name in names or f.stem in names):
+              copy2(f,target/f.name)
+          print('HRRR map assets:',sorted(x.name for x in target.iterdir()))
+          PYASSETS
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install winter plotting dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-winter.txt
+          python -m pip install boto3 "herbie-data==2026.9.2"
+
+      - name: Discover all published HRRR hourly cycles and plot unfinished hours
+        shell: bash
+        env:
+          CYCLE: ${{ inputs.cycle || 'PRIORITY' }}
+          HOURS: ${{ inputs.forecast_hours || 'ALL' }}
+          MAX_HOURS: ${{ inputs.max_hours || '0' }}
+          BUDGET: ${{ inputs.time_budget_minutes || '45' }}
+          LOOKBACK: ${{ inputs.lookback_hours || '96' }}
+          IDLE_WAIT: ${{ inputs.idle_wait_minutes || '15' }}
+          POLL_SECONDS: ${{ inputs.poll_seconds || '90' }}
+          DOMAINS: ${{ inputs.domains || 'lbf,regional,central_plains' }}
+          PUBLISH: ${{ inputs.publish == true && 'true' || 'false' }}
+          REBUILD: ${{ inputs.rebuild_existing_hours == true && 'true' || 'false' }}
+        run: |
+          cmd=(python scripts/process_hrrr_hourly.py
+            --cycle "$CYCLE" --hours "$HOURS" --max-hours "$MAX_HOURS"
+            --domains "$DOMAINS" --max-wall-minutes "$BUDGET"
+            --lookback-hours "$LOOKBACK" --keep-going
+            --idle-wait-minutes "$IDLE_WAIT" --poll-seconds "$POLL_SECONDS")
+          if [[ "$CYCLE" == 'PRIORITY' && "$HOURS" == 'ALL' && "$PUBLISH" == 'true' ]]; then
+            cmd+=(--wait-for-new-hours)
+          fi
+          if [[ "$PUBLISH" == 'true' ]]; then
+            cmd+=(--publish)
+            if [[ "$REBUILD" != 'true' ]]; then cmd+=(--skip-published); fi
+          fi
+          "${cmd[@]}"
+
+      - name: Attach preliminary maps and manifests to workflow artifacts
+        if: ${{ always() && inputs.publish == false }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hrrr-winter-test-maps
+          path: ${{ github.workspace }}/hrrr_winter_output/site_export/runs/cams/hrrr/winter/
+          if-no-files-found: warn
+          retention-days: 3
