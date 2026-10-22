@@ -2,16 +2,17 @@ name: RRFS-MPAS Winter | All Available Forecast Hours
 
 # Default produces LBF, Regional, and Central Plains per selected FHR.
 # Rebuild existing hours to backfill newly introduced wind-speed PNGs on S3.
-# The publisher serializes runs.json updates; no running job is cancelled.
-# Hourly schedule enabled: processes incrementally and uploads each completed FHR.
+# The workflow serializes runs.json updates; no running job is cancelled.
+# cron-job.org hourly dispatch prioritizes unfinished 00Z/12Z hours, checkpointing in S3.
+# Automation runs under a wall-clock budget rather than truncating at F006.
 # The runner filters FTP cycles to 00/03/06/09/12/15/18/21Z only.
 on:
   workflow_dispatch:
     inputs:
       cycle:
-        description: 'AUTO = newest eligible 3-hourly cycle; RECENT = previous eligible cycles; or YYYYMMDDHH'
+        description: 'PRIORITY = unfinished 00Z/12Z first + shorter runs; AUTO, RECENT, or YYYYMMDDHH'
         required: true
-        default: 'AUTO'
+        default: 'PRIORITY'
         type: string
       forecast_hours:
         description: 'ALL, 006, 000-048, or 000,003,006'
@@ -24,27 +25,34 @@ on:
         default: 'lbf,regional,central_plains'
         type: string
       max_hours:
-        description: 'Maximum forecast hours to process per run (0 = ALL without limit)'
+        description: 'Max forecast-hour count (0 = unlimited, time budget applies)'
         required: true
-        default: '6'
+        default: '0'
         type: string
       publish:
         description: 'Publish each completed forecast hour to AWS S3'
         required: true
         default: true
         type: boolean
+      time_budget_minutes:
+        description: 'Minutes to run before checkpointing (240 recommended; 330-minute job cap)'
+        required: true
+        default: '240'
+        type: string
       rebuild_existing_hours:
         description: 'When publishing, re-render hours even if their domains are already in S3 (use to repair missing QPF)'
         required: true
         default: false
         type: boolean
-  # Check for newly available hours once per hour (UTC).
-  schedule:
-    - cron: '25 * * * *'
+  # No GitHub schedule: cron-job.org POSTs to workflow_dispatch hourly at :25 UTC.
+  # Keep only one automatic trigger to avoid duplicate runs.
 
 permissions:
   contents: read
 concurrency:
+  # Serialize S3 manifest + runs.json merges to avoid lost hours from concurrent writes.
+  # GitHub can replace *pending* workflow_dispatch triggers, but each started job re-reads S3
+  # and the FTP inventory, so pending backlog is recovered on a later run.
   group: rrfs-mpas-winter-site-publisher
   cancel-in-progress: false
 
@@ -60,7 +68,7 @@ jobs:
       MPAS_OUT_DIR: ${{ github.workspace }}/rrfs_mpas_winter_output
       MPAS_ASSET_DIR: ${{ github.workspace }}/assets
       MPAS_FETCH_ROADS: '1'
-      MPAS_REQUIRE_MAP_ASSETS: ${{ (inputs.publish == true || github.event_name == 'schedule') && '1' || '0' }}
+      MPAS_REQUIRE_MAP_ASSETS: ${{ inputs.publish == true && '1' || '0' }}
       GSL_FTP_EMAIL: ${{ secrets.GSL_FTP_EMAIL }}
       AWS_BUCKET: ${{ secrets.AWS_BUCKET }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -114,14 +122,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-winter.txt
 
-      - name: Discover FTP inventory and render available forecast hours
+      - name: Prioritize 00Z/12Z backlog and publish each available forecast hour
         shell: bash
         env:
-          CYCLE_ARG: ${{ inputs.cycle || 'RECENT' }}
+          CYCLE_ARG: ${{ inputs.cycle || 'PRIORITY' }}
           HOURS_ARG: ${{ inputs.forecast_hours || 'ALL' }}
           DOMAINS_ARG: ${{ inputs.domains || 'lbf,regional,central_plains' }}
-          MAX_HOURS_ARG: ${{ inputs.max_hours || '6' }}
-          PUBLISH_ARG: ${{ (inputs.publish == true || github.event_name == 'schedule') && 'true' || 'false' }}
+          MAX_HOURS_ARG: ${{ inputs.max_hours || '0' }}
+          TIME_BUDGET_ARG: ${{ inputs.time_budget_minutes || '240' }}
+          PUBLISH_ARG: ${{ inputs.publish == true && 'true' || 'false' }}
           REBUILD_ARG: ${{ inputs.rebuild_existing_hours && 'true' || 'false' }}
         run: |
           cmd=(python scripts/process_available_hours.py
@@ -129,6 +138,8 @@ jobs:
                --hours "$HOURS_ARG"
                --domains "$DOMAINS_ARG"
                --max-hours "$MAX_HOURS_ARG"
+               --max-wall-minutes "$TIME_BUDGET_ARG"
+               --lookback-hours 96
                --keep-going)
           # Rebuild can repair QPF missing from previously-published hours.
           # A dry-run always plots requested hours, regardless of S3 contents.
