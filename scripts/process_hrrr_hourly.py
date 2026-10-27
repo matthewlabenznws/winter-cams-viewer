@@ -4,15 +4,18 @@ SAFE FIRST TEST:
   python scripts/process_hrrr_hourly.py --cycle AUTO --hours 006 --max-hours 1
 
 AUTOMATIC (after reviewing maps):
-  python scripts/process_hrrr_hourly.py --cycle PRIORITY --hours ALL \
+  python scripts/process_hrrr_hourly.py --cycle LATEST --hours ALL \
     --max-hours 0 --max-wall-minutes 45 --skip-published --publish \
     --wait-for-new-hours --idle-wait-minutes 15 --poll-seconds 90 --keep-going
 
 NOAA public S3 listing discovers actual published prs+sfc GRIB2 .idx files
 efficiently; Herbie verifies availability and downloads the selected messages. No hypothetical forecast hour is invented.
 Non-extended hourly cycles go through F018; 00/06/12/18 through F048.
+LATEST mode considers the six newest hourly cycles plus the eight newest
+00/06/12/18Z cycles, rather than scanning 95 old cycles for work. Adjust
+--recent-cycles and --extended-cycles if your hourly production rate changes.
 Each completed FHR is published with a manifest/index checkpoint; already
-published FHR/domain pairs are skipped at the next run. PRIORITY + ALL is
+published FHR/domain pairs are skipped at the next run. LATEST + ALL is
 STRICTLY GAP AWARE: within each individual cycle, F003 is never plotted until
 F002 has been published for all requested domains. While plotting F002, new
 F003 availability is detected immediately when F002 finishes. When the queue
@@ -163,6 +166,22 @@ def next_unpublished_hour(cycle: str, done: dict[tuple[str, int], set[str]],
     return None
 
 
+def select_recent_runs(inventory: dict[str, list[int]], recent_cycles: int = 6,
+                       extended_cycles: int = 8) -> dict[str, list[int]]:
+    """Keep recent hourly cycles AND enough 00/06/12/18 cycles to resume F048.
+
+    Selection is independent of forecast-hour availability. A missing F002 does
+    not remove a cycle that has F001, and never makes F003 count as complete.
+    The S3 runs.json tracks completed hours. Older cycles stay on S3 even after
+    they age out of this active processing window.
+    """
+    ordered = sorted(inventory, reverse=True)
+    latest = ordered[:recent_cycles]
+    extended = [c for c in ordered if int(c[-2:]) in (0, 6, 12, 18)][:extended_cycles]
+    keep = set(latest) | set(extended)
+    return {c: inventory[c] for c in ordered if c in keep}
+
+
 def build_plan(inventory: dict[str, list[int]], cycle_spec: str,
                requested_hours: set[int] | None, done: dict[tuple[str, int], set[str]],
                domains: set[str], max_hours: int = 0) -> tuple[list[tuple[str, int]], int]:
@@ -176,11 +195,11 @@ def build_plan(inventory: dict[str, list[int]], cycle_spec: str,
     if spec == 'AUTO':
         cycles = sorted((c for c, hrs in inventory.items()
                   if any(h > 0 and (requested_hours is None or h in requested_hours) for h in hrs)), reverse=True)[:1]
-    elif spec == 'PRIORITY':
+    elif spec in ('PRIORITY', 'LATEST'):
         cycles = sorted(inventory, reverse=True)
     else:
         if not re.fullmatch(r'\d{10}', spec):
-            raise ValueError('Cycle must be AUTO, PRIORITY or YYYYMMDDHH')
+            raise ValueError('Cycle must be AUTO, LATEST, PRIORITY or YYYYMMDDHH')
         cycles = [spec] if spec in inventory else []
     if not cycles:
         return [], 0
@@ -202,15 +221,17 @@ def build_plan(inventory: dict[str, list[int]], cycle_spec: str,
                     break  # Do not jump an unpublished/missing forecast hour.
                 continue
             item = (cycle, fhr)
-            if spec == 'PRIORITY':
+            if spec in ('PRIORITY', 'LATEST'):
                 (long_queue if int(cycle[-2:]) in (0, 6, 12, 18) else short_queue).append(item)
             else:
                 normal.append(item)
-    if spec != 'PRIORITY':
+    if spec not in ('PRIORITY', 'LATEST'):
         plan = sorted(normal, key=lambda item: (item[0], -item[1]), reverse=True)
     else:
         long_queue.sort(key=lambda item: (item[0], item[1]))
-        short_queue.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        # Newest ordinary cycle first, but FORECAST HOURS ASCENDING within each.
+        # Reverse-sorting (cycle, fhr) incorrectly processed F018 before F001.
+        short_queue.sort(key=lambda item: (-int(item[0]), item[1]))
         plan = []
         a = b = 0
         while a < len(long_queue) or b < len(short_queue):
@@ -224,7 +245,7 @@ def build_plan(inventory: dict[str, list[int]], cycle_spec: str,
 
 def choose_next(plan: list[tuple[str, int]], spec: str, phase: int) -> tuple[str, int]:
     """Phase prevents recomputing the plan from starving short hourly cycles."""
-    if spec.strip().upper() != 'PRIORITY':
+    if spec.strip().upper() not in ('PRIORITY', 'LATEST'):
         return plan[0]
     prefer_long = phase % 3 == 0
     for cycle, fhr in plan:
@@ -288,13 +309,17 @@ def cleanup_published(output: Path, manifest: Path):
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--cycle', default='AUTO', help='AUTO latest, PRIORITY all recent, or YYYYMMDDHH')
-    p.add_argument('--hours', default='006', help='ALL or 006, 006-012, etc.')
+    p.add_argument('--cycle', default='LATEST', help='LATEST selected recent runs; AUTO newest single run; PRIORITY all lookback; or YYYYMMDDHH')
+    p.add_argument('--hours', default='ALL', help='ALL or 006, 006-012, etc.')
     p.add_argument('--domains', default='lbf,regional,central_plains')
     p.add_argument('--max-hours', type=int, default=0, help='0 = no forecast-hour count cap')
     p.add_argument('--max-wall-minutes', type=int, default=45,
                    help='Wall time budget; checks between completed hours')
-    p.add_argument('--lookback-hours', type=int, default=96)
+    p.add_argument('--lookback-hours', type=int, default=48)
+    p.add_argument('--recent-cycles', type=int, default=6,
+                   help='LATEST mode: newest N hourly cycles (default 6)')
+    p.add_argument('--extended-cycles', type=int, default=8,
+                   help='LATEST mode: newest N 00/06/12/18Z cycles (default 8)')
     p.add_argument('--publish', action='store_true')
     p.add_argument('--skip-published', action='store_true')
     p.add_argument('--keep-going', action='store_true')
@@ -307,17 +332,21 @@ def main(argv=None) -> int:
                    help='Maximum time to stay idle waiting for a newly released FHR')
     args = p.parse_args(argv)
     if (args.max_hours < 0 or args.max_wall_minutes < 0 or args.lookback_hours < 0 or
-        args.poll_seconds < 15 or args.idle_wait_minutes < 0):
+        args.poll_seconds < 15 or args.idle_wait_minutes < 0 or
+        args.recent_cycles < 1 or args.extended_cycles < 1):
         p.error('Limits must be >= 0, and poll-seconds must be >= 15')
     domains = [x.strip() for x in args.domains.split(',') if x.strip()]
     if not domains or any(d not in VALID_DOMAINS for d in domains):
         p.error('Domains must come from lbf,regional,central_plains')
     requested = parse_requested_hours(args.hours)
     inventory = discover_source(args.lookback_hours)
-    print(f'NOAA published {sum(map(len, inventory.values()))} paired forecast-hour sets '
-          f'from {len(inventory)} hourly HRRR cycles', flush=True)
+    print(f'NOAA index contains {sum(map(len, inventory.values()))} paired forecast-hour sets '
+          f'from {len(inventory)} HRRR cycles inside the lookback window', flush=True)
     if not inventory:
         raise RuntimeError('No HRRR source inventory available. Check NOAA public bucket.')
+    if args.cycle.strip().upper() == 'LATEST':
+        inventory = select_recent_runs(inventory, args.recent_cycles, args.extended_cycles)
+        print(f'LATEST eligible HRRR cycles ({len(inventory)}): '+', '.join(inventory), flush=True)
     done = published_domains(remote_index()) if args.skip_published else {}
     chosen_domains = set(domains)
     plan, skipped = build_plan(inventory, args.cycle, requested, done,
@@ -441,9 +470,6 @@ def main(argv=None) -> int:
         return 1
     return 0
 
-
-if __name__ == '__main__':
-    sys.exit(main())
 
 if __name__ == '__main__':
     sys.exit(main())
