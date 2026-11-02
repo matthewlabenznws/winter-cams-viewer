@@ -311,10 +311,10 @@ def field_key(gid):
 def field_definitions(fhr: int):
     # Each candidate is a metadata predicate; first matching message accepted.
     defs = {
-        'ref1km': lambda k: k[:3] == (0, 16, 195) and k[3:5] == ('heightAboveGround', 1000) and k[5] == 'instant',
+        'ref1km': lambda k: k[:2] == (0, 16) and k[2] in (4, 195) and k[3:5] == ('heightAboveGround', 1000) and k[5] == 'instant',
         # Composite reflectivity metadata can vary slightly by source.
         # Accept the common GRIB2 identifier used by UPP/refc-style output.
-        'refcomp': lambda k: k[:3] == (0, 16, 196) and k[5] == 'instant',
+        'refcomp': lambda k: k[:2] == (0, 16) and k[2] in (5, 196) and k[3] in ('atmosphereSingleLayer', 'atmosphere') and k[5] == 'instant',
         'rain':   lambda k: k[:3] == (0, 1, 33) and k[3] == 'surface' and k[5] == 'instant',
         'snow':   lambda k: k[:3] == (0, 1, 36) and k[3] == 'surface' and k[5] == 'instant',
         'sleet':  lambda k: k[:3] == (0, 1, 35) and k[3] == 'surface' and k[5] == 'instant',
