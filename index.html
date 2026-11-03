@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#111111">
-  <meta name="description" content="Winter CAMs forecast viewer for experimental RRFS-MPAS model graphics across the North Platte region.">
+  <meta name="description" content="Winter CAMs forecast viewer for HRRR and RRFS-MPAS graphics across the North Platte region.">
   <title>Winter CAMs Viewer | North Platte</title>
   <link rel="stylesheet" href="assets/site.css">
   <script src="assets/config.js" defer></script>
@@ -18,11 +18,11 @@
       <div class="masthead-credit">Created by <strong>Matthew Labenz</strong></div>
     </div>
     <nav class="subbar model-nav" aria-label="Winter forecast models">
-      <span class="model-coming" title="HRRR winter graphics will be added later">HRRR</span>
+      <a class="model-link" id="navHrrr" href="index.html?model=hrrr">HRRR</a>
       <span class="nav-divider" aria-hidden="true">/</span>
       <span class="model-coming" title="RRFS winter graphics will be added later">RRFS</span>
       <span class="nav-divider" aria-hidden="true">/</span>
-      <a class="model-link nav-active" href="./" aria-current="page">RRFS-MPAS</a>
+      <a class="model-link" id="navRrfsMpas" href="index.html?model=rrfs_mpas">RRFS-MPAS</a>
     </nav>
   </header>
   <main>
@@ -37,7 +37,7 @@
       <label for="modelSelect">Model:</label>
       <select id="modelSelect" aria-label="Model">
         <option value="rrfs_mpas">RRFS-MPAS</option>
-        <option value="hrrr" disabled>HRRR (coming later)</option>
+        <option value="hrrr">HRRR</option>
         <option value="rrfs" disabled>RRFS (coming later)</option>
       </select>
       <label for="productSelect">Product:</label>
@@ -97,7 +97,7 @@
           <img id="plotImage" class="plot-image" alt="" hidden>
           <div id="emptyState" class="empty-state">
             <h3 id="emptyTitle">Awaiting RRFS-MPAS winter graphics</h3>
-            <p id="emptyDetails">Published forecast maps will display here once available. F000 is intentionally disabled.</p>
+            <p id="emptyDetails">Published forecast maps will display here once available.</p>
           </div>
         </div>
         <div class="map-footnote">
