@@ -32,6 +32,9 @@ this test script does not publish to AWS S3 or modify your existing site.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
+from ftplib import FTP
 from urllib.request import urlretrieve
 from pathlib import Path
 import json
@@ -60,8 +63,15 @@ from eccodes import codes_grib_new_from_file, codes_get, codes_get_array, codes_
 # ──────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
 
+FTP_HOST = 'gsdftp.fsl.noaa.gov'
+FTP_DIR = '/ncar/upp/det'
+# Anonymous FTP requires an email-shaped password; enter your own address.
+FTP_EMAIL = os.getenv('GSL_FTP_EMAIL', 'your_email@example.com')
 CYCLE_ID = os.getenv('WINTER_CYCLE', 'AUTO').strip().upper()  # YYYYMMDDHH or AUTO
 FORECAST_HOUR = int(os.getenv('WINTER_FHR', '6'))  # one forecast hour per job
+# Concurrent PNG rendering per domain on Linux GitHub runners.
+# Only map plots are parallelized; GRIB download/decode, stage and S3 remain serialized.
+PLOT_WORKERS = int(os.getenv('WINTER_PLOT_WORKERS', '3'))
 LEVELS_HPA = (925, 850, 700)
 # Vorticity maps use three levels; do not add 500 mb to the original
 # temperature, wind-speed, or frontogenesis product loops.
@@ -202,8 +212,8 @@ HL_MIN_SPACING_KM = 275      # reject closely clustered centers
 HL_BLACK_OUTLINE_PT = 3.2    # a single solid black stroke (no white inner outline)
 HL_LETTER_FONT_SIZE = 22
 HL_PRESSURE_FONT_SIZE = 13
-HL_PRESSURE_LAT_OFFSET = 0.18  # spacing for high centers
-HL_LOW_PRESSURE_LAT_OFFSET = 0.10  # bring L pressure value closer to the letter
+HL_PRESSURE_LAT_OFFSET = 0.24  # spacing for high centers
+HL_LOW_PRESSURE_LAT_OFFSET = 0.24  # same separation as H centers
 MSLP_LABEL_INTERVAL_HPA = 4  # ALL MSLP maps: draw every 2 mb, label every 4 mb
 THICKNESS_LABEL_INTERVAL_DAM = 12  # draw every 6 dam, label every 12 dam
 CONTOUR_LABEL_SPACING = 10
@@ -278,10 +288,14 @@ def field_key(gid):
 def field_definitions(fhr: int):
     # Each candidate is a metadata predicate; first matching message accepted.
     defs = {
-        'ref1km': lambda k: k[:3] == (0, 16, 195) and k[3:5] == ('heightAboveGround', 1000) and k[5] == 'instant',
-        # Composite reflectivity metadata can vary slightly by source.
-        # Accept the common GRIB2 identifier used by UPP/refc-style output.
-        'refcomp': lambda k: k[:3] == (0, 16, 196) and k[5] == 'instant',
+        # Accept both standard (4/5) and NCEP local (195/196) reflectivity codes.
+        # The level and step checks exclude 4-km/263-K and hourly-maximum fields.
+        'ref1km': lambda k: (k[0:2] == (0, 16) and k[2] in (4, 195)
+                             and k[3:5] == ('heightAboveGround', 1000)
+                             and k[5] == 'instant'),
+        'refcomp': lambda k: (k[0:2] == (0, 16) and k[2] in (5, 196)
+                             and k[3] in ('atmosphereSingleLayer', 'atmosphere')
+                             and k[5] == 'instant'),
         'rain':   lambda k: k[:3] == (0, 1, 33) and k[3] == 'surface' and k[5] == 'instant',
         'snow':   lambda k: k[:3] == (0, 1, 36) and k[3] == 'surface' and k[5] == 'instant',
         'sleet':  lambda k: k[:3] == (0, 1, 35) and k[3] == 'surface' and k[5] == 'instant',
@@ -299,7 +313,7 @@ def field_definitions(fhr: int):
                     and k[5] == 'accum' and k[6] == f'0-{fhr}',
         't2m':    lambda k: k[:3] == (0, 0, 0) and k[3:5] == ('heightAboveGround', 2),
         # Native HRRR surface fields confirmed in the F001/F006/F024
-        # HRRR GRIB2 parameter identifiers (not ecCodes short names).
+        # GSL inventory (GRIB2 identifiers, not ecCodes short names).
         'gust10m': lambda k: k[:3] == (0, 2, 22) and k[3] in ('surface', 'heightAboveGround') and k[5] == 'instant',
         'u10m': lambda k: k[:3] == (0, 2, 2) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
         'v10m': lambda k: k[:3] == (0, 2, 3) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
@@ -1296,11 +1310,6 @@ def finish(fig, ax, fname, label=None, cf=None, colorbar_extend=None):
             cb.ax.xaxis.set_label_position('bottom')
             cb.ax.tick_params(axis='x', which='both', length=0, width=0,
                               labeltop=True, labelbottom=False, labelsize=8, pad=3)
-    # Watermark INSIDE the geographic plot, not in the white outer margin.
-    ax.text(.995,.012,'HRRR MODEL GUIDANCE · evaluation only',
-            transform=ax.transAxes,ha='right',va='bottom',fontsize=8,
-            color='#333333',weight='bold',zorder=260,clip_on=True,
-            path_effects=[pe.withStroke(linewidth=2.4,foreground='white')])
     output_path=OUT_DIR/fname
     save_kwargs={'dpi':FIGURE_DPI,'facecolor':'white'}
     if CAMS_SAVE_TIGHT:
@@ -2158,6 +2167,161 @@ def stage_site_run(payload):
     print('Site index:', index_path)
     return str(index_path)
 
+
+# ──────────────────────────────────────────────────────────────────
+# PARALLEL MAP RENDERING (SAME forecast hour, not forecast-hour sharding)
+# The Linux 'fork' start method inherits NumPy arrays as copy-on-write pages.
+# No GRIB reread, no duplicative download, and no large arrays sent to workers.
+# Each worker writes distinct PNG filenames. AWS is published ONLY after all
+# workers complete, by scripts/publish_hrrr_winter.py in the parent pipeline.
+# ──────────────────────────────────────────────────────────────────
+_PLOT_SHARED = None  # (lat, lon, rotated fields, cycle_id), inherited via fork
+_PLOT_GRAD = None    # calculated lazily in each worker only when needed
+_PLOT_DIAGS = {}     # per-worker pressure-level diagnosis cache
+
+
+def _build_plot_tasks():
+    """List enabled maps in the original sequential output order."""
+    tasks = []
+    if DO_PTYPE:
+        if DO_PTYPE_REF1KM:
+            tasks.append(('ptype', 'ref1km'))
+        if DO_PTYPE_COMPOSITE:
+            tasks.append(('ptype', 'refcomp'))
+    if DO_QPF:
+        tasks.append(('qpf',))
+    if DO_ACCUM_SNOWFALL:
+        tasks.append(('asnow',))
+    if DO_SNOWFALL_10TO1:
+        tasks.append(('snow10to1',))
+    if DO_SNOW_WATER_EQUIV:
+        tasks.append(('weasd',))
+    if DO_2M_TEMP:
+        tasks.append(('t2m',))
+    if DO_10M_GUST:
+        tasks.append(('gust10m',))
+    if DO_10M_WSPD_MSLP:
+        tasks.append(('wspd10m',))
+    if DO_2M_RH:
+        tasks.append(('rh2m',))
+    if DO_2M_DEWPOINT:
+        tasks.append(('d2m',))
+    if DO_LEVEL_TEMP:
+        for lev in LEVELS_HPA:
+            tasks.append(('level_temp', lev))
+    if DO_LEVEL_WSPD:
+        for lev in LEVELS_HPA:
+            tasks.append(('level_wspd', lev))
+    if DO_LEVEL_VORTICITY:
+        for lev in VORTICITY_LEVELS_HPA:
+            tasks.append(('vorticity', lev))
+    if DO_ADV or DO_FGEN:
+        for lev in LEVELS_HPA:
+            # Group the advection and frontogenesis products at one level to
+            # avoid calculating the same costly gradients twice.
+            tasks.append(('dynamics', lev))
+    if DO_THICKNESS_MSLP:
+        tasks.append(('thickness',))
+    return tasks
+
+
+def _render_plot_task(task):
+    """Worker function: receive only a small task, not the large HRRR arrays."""
+    global _PLOT_GRAD, _PLOT_DIAGS
+    if _PLOT_SHARED is None:
+        raise RuntimeError('Parallel HRRR plotting arrays were not initialized')
+    lat, lon, fields, cycle_id = _PLOT_SHARED
+    kind, *extra = task
+    if kind == 'ptype':
+        result = plot_ptype(lat, lon, fields, cycle_id, reflectivity_field=extra[0])
+    elif kind == 'qpf':
+        result = plot_qpf(lat, lon, fields, cycle_id)
+    elif kind == 'asnow':
+        result = plot_accumulated_snowfall(lat, lon, fields, cycle_id)
+    elif kind == 'snow10to1':
+        result = plot_snowfall_10to1(lat, lon, fields, cycle_id)
+    elif kind == 'weasd':
+        result = plot_snow_water_equivalent(lat, lon, fields, cycle_id)
+    elif kind == 't2m':
+        result = plot_2m_temperature(lat, lon, fields, cycle_id)
+    elif kind == 'gust10m':
+        result = plot_10m_gust(lat, lon, fields, cycle_id)
+    elif kind == 'wspd10m':
+        result = plot_10m_sustained_wind_mslp(lat, lon, fields, cycle_id)
+    elif kind == 'rh2m':
+        result = plot_2m_rh(lat, lon, fields, cycle_id)
+    elif kind == 'd2m':
+        result = plot_2m_dewpoint(lat, lon, fields, cycle_id)
+    elif kind == 'level_temp':
+        result = plot_level_temperature(lat, lon, fields, extra[0], cycle_id)
+    elif kind == 'level_wspd':
+        result = plot_level_windspeed(lat, lon, fields, extra[0], cycle_id)
+    elif kind == 'vorticity':
+        if _PLOT_GRAD is None:
+            _PLOT_GRAD = GeographicGradient(lat, lon)
+        result = plot_level_relative_vorticity(lat, lon, fields, extra[0],
+                                               cycle_id, _PLOT_GRAD)
+    elif kind == 'dynamics':
+        lev = extra[0]
+        if _PLOT_GRAD is None:
+            _PLOT_GRAD = GeographicGradient(lat, lon)
+        if lev not in _PLOT_DIAGS:
+            _PLOT_DIAGS[lev] = diagnostics_for_level(lev, fields, _PLOT_GRAD)
+        diag = _PLOT_DIAGS[lev]
+        if diag is None:
+            return []
+        outputs = []
+        if DO_ADV:
+            f = plot_adv(lat, lon, diag, lev, cycle_id, fields)
+            if f:
+                outputs.append(f)
+        if DO_FGEN:
+            f = plot_fgen(lat, lon, diag, lev, cycle_id, fields)
+            if f:
+                outputs.append(f)
+        return outputs
+    elif kind == 'thickness':
+        result = plot_thickness(lat, lon, fields, cycle_id)
+    else:
+        raise ValueError(f'Unrecognized HRRR plotting task: {task}')
+    return [result] if result else []
+
+
+def _render_domain_maps(lat, lon, fields, cycle_id):
+    """Plot all products, sharing decoded arrays through fork on Linux."""
+    global _PLOT_SHARED, _PLOT_GRAD, _PLOT_DIAGS
+    tasks = _build_plot_tasks()
+    if not tasks:
+        return []
+    if not (1 <= PLOT_WORKERS <= 8):
+        raise ValueError('WINTER_PLOT_WORKERS must be from 1 to 8')
+    _PLOT_SHARED = (lat, lon, fields, cycle_id)
+    _PLOT_GRAD = None
+    _PLOT_DIAGS = {}
+    try:
+        workers = min(PLOT_WORKERS, len(tasks))
+        if sys.platform != 'linux' and workers > 1:
+            print('Parallel fork map rendering requires Linux; using 1 worker ' 
+                  'on this platform.', flush=True)
+            workers = 1
+        print(f'  [{DOMAIN_NAME}] Rendering {len(tasks)} map tasks using '
+              f'{workers} plotting process(es)', flush=True)
+        if workers == 1:
+            groups = [_render_plot_task(task) for task in tasks]
+        else:
+            # Linux GitHub-hosted runners: fork preserves decoded GRIB arrays
+            # copy-on-write rather than pickling them into every subprocess.
+            with ProcessPoolExecutor(max_workers=workers,
+                                     mp_context=get_context('fork')) as executor:
+                groups = list(executor.map(_render_plot_task, tasks, chunksize=1))
+        # executor.map maintains submission ordering; manifest is unchanged.
+        return [name for group in groups for name in group]
+    finally:
+        _PLOT_SHARED = None
+        _PLOT_GRAD = None
+        _PLOT_DIAGS = {}
+
+
 def run():
     global DOMAIN_NAME,EXTENT
     prepare_assets()
@@ -2189,52 +2353,12 @@ def run():
         print(f'\\n========== DOMAIN {domain.upper()} | {EXTENT} ==========')
         lat,lon,fields=crop_to_domain(lat_all,lon_all,fields_all)
         fields=rotate_winds_to_earth(lat,lon,fields,uv_flags,wind_grid_meta)
-        outputs=[]
-        def add(fname):
-            if fname: outputs.append(fname)
-        if DO_PTYPE:
-            if DO_PTYPE_REF1KM:
-                add(plot_ptype(lat,lon,fields,cycle_id,reflectivity_field='ref1km'))
-            if DO_PTYPE_COMPOSITE:
-                add(plot_ptype(lat,lon,fields,cycle_id,reflectivity_field='refcomp'))
-        if DO_QPF:
-            add(plot_qpf(lat,lon,fields,cycle_id))
-        if DO_ACCUM_SNOWFALL:
-            add(plot_accumulated_snowfall(lat,lon,fields,cycle_id))
-        if DO_SNOWFALL_10TO1:
-            add(plot_snowfall_10to1(lat,lon,fields,cycle_id))
-        if DO_SNOW_WATER_EQUIV:
-            add(plot_snow_water_equivalent(lat,lon,fields,cycle_id))
-        if DO_2M_TEMP:
-            add(plot_2m_temperature(lat,lon,fields,cycle_id))
-        if DO_10M_GUST:
-            add(plot_10m_gust(lat,lon,fields,cycle_id))
-        if DO_10M_WSPD_MSLP:
-            add(plot_10m_sustained_wind_mslp(lat,lon,fields,cycle_id))
-        if DO_2M_RH:
-            add(plot_2m_rh(lat,lon,fields,cycle_id))
-        if DO_2M_DEWPOINT:
-            add(plot_2m_dewpoint(lat,lon,fields,cycle_id))
-        if DO_LEVEL_TEMP:
-            for lev in LEVELS_HPA:
-                add(plot_level_temperature(lat,lon,fields,lev,cycle_id))
-        if DO_LEVEL_WSPD:
-            for lev in LEVELS_HPA:
-                add(plot_level_windspeed(lat,lon,fields,lev,cycle_id))
-        if DO_LEVEL_VORTICITY or DO_ADV or DO_FGEN:
-            grad=GeographicGradient(lat,lon)
-        if DO_LEVEL_VORTICITY:
-            for lev in VORTICITY_LEVELS_HPA:
-                add(plot_level_relative_vorticity(lat,lon,fields,lev,cycle_id,grad))
-        if DO_ADV or DO_FGEN:
-            for lev in LEVELS_HPA:
-                diag=diagnostics_for_level(lev,fields,grad)
-                if diag is None:continue
-                if DO_ADV:add(plot_adv(lat,lon,diag,lev,cycle_id,fields))
-                if DO_FGEN:add(plot_fgen(lat,lon,diag,lev,cycle_id,fields))
-        if DO_THICKNESS_MSLP:
-            add(plot_thickness(lat,lon,fields,cycle_id))
-        add(four_panel_preview(outputs,cycle_id))
+        # Generate independent PNGs in parallel; only main process stages/publishes.
+        outputs = _render_domain_maps(lat, lon, fields, cycle_id)
+        # Optional montage uses already completed PNGs (never races workers).
+        preview = four_panel_preview(outputs, cycle_id)
+        if preview:
+            outputs.append(preview)
         results[domain]={'extent':EXTENT,'outputs':outputs}
         print(f'Domain {domain}: {len(outputs)} graphic(s) written')
 
