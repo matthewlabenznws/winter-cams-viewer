@@ -1,20 +1,22 @@
 name: HRRR Winter | Hourly Cycles
 
-# No GitHub cron: cron-job.org will use workflow_dispatch once each hour.
-# First run manually with PUBLISH=false. After inspecting maps, enable ONE
-# cron-job.org task at :55 UTC each hour with only {"ref":"main"} as body.
+# No GitHub cron: cron-job.org will use workflow_dispatch hourly.
+# PRIORITY processes the most recent three cycles plus the latest extended run, resuming via S3.
+# Existing cron-job.org workflow_dispatch may run hourly. If already set up, do not
+# create a duplicate cron. For first AWS test, use max_hours=1 and publish=true;
+# then default max_hours=0 and forecast_hours=ALL to resume all available hours.
 # Sequential workflow queue: this prevents S3 index races and avoids cancelling
 # pending runs if processing takes longer than expected.
 on:
   workflow_dispatch:
     inputs:
       cycle:
-        description: 'AUTO = newest available cycle for testing; PRIORITY = all 00Z-23Z cycles with long-run priority; or YYYYMMDDHH'
+        description: 'PRIORITY/LATEST newest 3 cycles plus extended; AUTO newest only; YYYYMMDDHH exact'
         type: string
         required: true
         default: 'PRIORITY'
       forecast_hours:
-        description: 'ALL = all published available forecast hours; or 006 / 006-012'
+        description: 'ALL = F000 to F018/F048, or select 006 / 006-012'
         type: string
         required: true
         default: 'ALL'
@@ -27,7 +29,7 @@ on:
         description: 'Stop between forecast hours near this runtime; next cron run resumes from S3'
         type: string
         required: true
-        default: '45'
+        default: '55'
       idle_wait_minutes:
         description: 'Maximum minutes to poll when waiting for new forecast-hour files'
         type: string
@@ -39,10 +41,10 @@ on:
         required: true
         default: '90'
       lookback_hours:
-        description: 'How far back to search for unfinished hourly model cycles'
+        description: 'UTC hours to look back for all unfinished hourly cycles; explicit cycle ignores this'
         type: string
         required: true
-        default: '96'
+        default: '72'
       domains:
         description: 'One or more: lbf,regional,central_plains'
         type: string
@@ -123,14 +125,32 @@ jobs:
           python -m pip install -r requirements-winter.txt
           python -m pip install boto3 "herbie-data==2026.9.2"
 
-      - name: Discover all published HRRR hourly cycles and plot unfinished hours
+      - name: Verify HRRR scripts and AWS configuration
+        shell: bash
+        env:
+          PUBLISH: ${{ inputs.publish == true && 'true' || 'false' }}
+        run: |
+          for file in hrrr_winter.py scripts/process_hrrr_hourly.py \
+                      scripts/herbie_hrrr_fetch.py scripts/publish_hrrr_winter.py; do
+            test -f "$file" || { echo "Missing required file: $file"; exit 1; }
+          done
+          if [[ "$PUBLISH" == 'true' ]]; then
+            for key in AWS_BUCKET AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+              if [[ -z "${!key:-}" ]]; then
+                echo "Missing AWS secret: $key"
+                exit 1
+              fi
+            done
+          fi
+
+      - name: Plot the latest HRRR cycles and resume their unfinished forecast hours
         shell: bash
         env:
           CYCLE: ${{ inputs.cycle || 'PRIORITY' }}
           HOURS: ${{ inputs.forecast_hours || 'ALL' }}
           MAX_HOURS: ${{ inputs.max_hours || '0' }}
-          BUDGET: ${{ inputs.time_budget_minutes || '45' }}
-          LOOKBACK: ${{ inputs.lookback_hours || '96' }}
+          BUDGET: ${{ inputs.time_budget_minutes || '55' }}
+          LOOKBACK: ${{ inputs.lookback_hours || '72' }}
           IDLE_WAIT: ${{ inputs.idle_wait_minutes || '15' }}
           POLL_SECONDS: ${{ inputs.poll_seconds || '90' }}
           DOMAINS: ${{ inputs.domains || 'lbf,regional,central_plains' }}
@@ -142,7 +162,7 @@ jobs:
             --domains "$DOMAINS" --max-wall-minutes "$BUDGET"
             --lookback-hours "$LOOKBACK" --keep-going
             --idle-wait-minutes "$IDLE_WAIT" --poll-seconds "$POLL_SECONDS")
-          if [[ "$CYCLE" == 'PRIORITY' && "$HOURS" == 'ALL' && "$PUBLISH" == 'true' ]]; then
+          if [[ ( "$CYCLE" == 'LATEST' || "$CYCLE" == 'PRIORITY' ) && "$HOURS" == 'ALL' && "$PUBLISH" == 'true' ]]; then
             cmd+=(--wait-for-new-hours)
           fi
           if [[ "$PUBLISH" == 'true' ]]; then
