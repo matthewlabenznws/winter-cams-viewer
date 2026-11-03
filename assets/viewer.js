@@ -1,12 +1,21 @@
-/* Winter CAMs viewer — a static GitHub Pages frontend for the RRFS-MPAS
-   winter JSON + PNG manifest format produced by the GitHub/S3 pipeline.
-   No server code, AWS credentials, or third-party JS packages are required. */
+/* Shared Winter CAMs viewer — one frontend for HRRR and RRFS-MPAS.
+   Both use the same run-index/manifest/PNG schema, under different S3 prefixes.
+   Choose a model in the existing dropdown; no second hrrr_viewer.js needed.
+   No AWS credentials belong in browser code. */
 (() => {
   'use strict';
 
   const cfg = window.WINTER_CAMS_CONFIG || {};
   const BASE_URL = String(cfg.dataBaseUrl || '').replace(/\/+$/, '');
-  const PREFIX = String(cfg.prefix || 'runs/cams/rrfs_mpas/winter/').replace(/^\/+|\/+$/g, '') + '/';
+  const MODEL_IDS = ['rrfs_mpas', 'hrrr'];
+  const MODEL_LABELS = { rrfs_mpas: 'RRFS-MPAS', hrrr: 'HRRR' };
+  const MODEL_PREFIXES = {
+    rrfs_mpas: String(cfg.modelPrefixes?.rrfs_mpas || cfg.prefix || 'runs/cams/rrfs_mpas/winter/').replace(/^\/+|\/+$/g, '') + '/',
+    hrrr: String(cfg.modelPrefixes?.hrrr || 'runs/cams/hrrr/winter/').replace(/^\/+|\/+$/g, '') + '/'
+  };
+  const modelParam = new URLSearchParams(location.search).get('model');
+  const MODEL_ID = MODEL_IDS.includes(modelParam) ? modelParam : 'rrfs_mpas';
+  const MODEL_LABEL = MODEL_LABELS[MODEL_ID];
   const FRAME_DELAY_MS = Number.isFinite(cfg.animationMs) ? Math.max(150, cfg.animationMs) : 650;
   const DOMAINS = ['lbf', 'regional', 'central_plains'];
   const DOMAIN_LABELS = { lbf: 'LBF', regional: 'Regional', central_plains: 'Central Plains' };
@@ -41,7 +50,7 @@
   const urlParams = new URLSearchParams(location.search);
   const initial = {
     cycle: urlParams.get('run'),
-    hour: Number(urlParams.get('fhr')),
+    hour: urlParams.has('fhr') ? Number(urlParams.get('fhr')) : null,
     product: urlParams.get('product'),
     domain: urlParams.get('domain'),
     view: urlParams.get('view'),
@@ -78,6 +87,7 @@
   };
   const byId = id => document.getElementById(id);
   const els = {
+    model: byId('modelSelect'),
     product: byId('productSelect'), run: byId('runSelect'), domain: byId('domainSelect'),
     view: byId('viewSelect'), rightProduct: byId('rightProductSelect'),
     rightBlock: byId('rightProductBlock'), rightPanel: byId('rightPanel'),
@@ -103,6 +113,39 @@
     viewerTitle: byId('viewerTitle'),
     fullLink: byId('fullImageLink')
   };
+  // The same index.html and viewer.js handle both models. Model switching
+  // reloads this page with ?model=... so no in-flight fetch from the previous
+  // model can overwrite maps, manifests, or the run list of the new one.
+  if (els.model) {
+    els.model.value = MODEL_ID;
+    els.model.addEventListener('change', () => {
+      const selected = els.model.value;
+      if (!MODEL_IDS.includes(selected) || selected === MODEL_ID) return;
+      stopAnimation();
+      const url = new URL(location.href);
+      url.searchParams.set('model', selected);
+      url.searchParams.delete('run');
+      url.searchParams.delete('fhr');
+      // Preserve domain, selected products, and view mode on model changes.
+      url.searchParams.set('domain', state.domain);
+      url.searchParams.set('view', state.view);
+      url.searchParams.set('product', state.product);
+      url.searchParams.set('rightProduct', state.rightProduct);
+      url.searchParams.set('thirdProduct', state.thirdProduct);
+      url.searchParams.set('fourthProduct', state.fourthProduct);
+      window.location.assign(url.toString());
+    });
+  }
+  for (const [id, model] of [['navHrrr', 'hrrr'], ['navRrfsMpas', 'rrfs_mpas']]) {
+    const link = byId(id);
+    if (!link) continue;
+    const active = model === MODEL_ID;
+    link.classList.toggle('nav-active', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+  document.title = `${MODEL_LABEL} Winter CAMs Viewer | North Platte`;
+
   // Clicking Latest re-enables automatic following; selecting an older run
   // manually holds that run while its forecast hours can keep arriving.
   function updateLatestLabel() {
@@ -184,7 +227,7 @@
         const response = await fetch(dataUrl(next.manifest));
         if (!response.ok) return;
         const candidate = await response.json();
-        if (candidate.model !== 'rrfs_mpas' || candidate.cycle !== cycle ||
+        if (candidate.model !== MODEL_ID || candidate.cycle !== cycle ||
             candidate.forecast_hour !== next.forecast_hour || !candidate.domains) return;
         manifestCache.set(next.manifest, candidate);
         manifest = candidate;
@@ -258,7 +301,7 @@
   }
   function dataUrl(relativePath) {
     // Only paths generated locally from the validated run metadata are accepted.
-    return BASE_URL + '/' + PREFIX + relativePath;
+    return BASE_URL + '/' + MODEL_PREFIXES[MODEL_ID] + relativePath;
   }
   function fmtHour(hour) { return 'F' + String(hour).padStart(3, '0'); }
   function fmtTile(hour) { return String(hour).padStart(3, '0'); }
@@ -365,6 +408,7 @@
   function syncAddress() {
     if (!state.cycle || state.hour === null) return;
     const url = new URL(location.href);
+    url.searchParams.set('model', MODEL_ID);
     url.searchParams.set('run', state.cycle);
     url.searchParams.set('fhr', String(state.hour));
     url.searchParams.set('product', state.product);
@@ -383,8 +427,8 @@
     const hours = entries.map(e => e.forecast_hour);
     const max = hours.length ? Math.max(...hours) : 0;
     els.slider.disabled = hours.length < 2;
-    // F000 is initialization, not a clickable/animated forecast hour.
-    els.slider.min = String(hours.length ? Math.min(...hours) : 1);
+    // F000 is selectable when a model actually published it.
+    els.slider.min = String(hours.length ? Math.min(...hours) : 0);
     els.slider.max = String(max);
     els.slider.step = '1';
     els.slider.value = String(state.hour ?? 0);
@@ -398,14 +442,14 @@
       const available = new Set(hours);
       const fragment = document.createDocumentFragment();
       for (let hour = 0; hour <= max; hour++) {
-        const exists = hour > 0 && available.has(hour);
+        const exists = available.has(hour);
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.textContent = fmtTile(hour);
         btn.className = 'frame ' + (exists ? 'available' : 'missing');
         btn.disabled = !exists;
         btn.dataset.hour = String(hour);
-        btn.setAttribute('aria-label', fmtHour(hour) + (hour === 0 ? ' initialization hour disabled' : exists ? ' available' : ' not published'));
+        btn.setAttribute('aria-label', fmtHour(hour) + (exists ? ' available' : ' not published'));
         if (exists) btn.addEventListener('click', () => {
           stopAnimation();
           void chooseHour(hour);
@@ -446,19 +490,20 @@
     els.latest.disabled = true;
     els.tiles.replaceChildren();
     els.validTime.textContent = 'Waiting for first model run';
-    els.title.textContent = 'RRFS-MPAS Winter Forecast';
-    els.viewerTitle.textContent = 'RRFS-MPAS Winter Graphics';
-    els.caption.textContent = 'RRFS-MPAS winter graphics · Awaiting first published run';
-    empty('Awaiting RRFS-MPAS winter graphics',
+    els.title.textContent = `${MODEL_LABEL} Winter Forecast`;
+    els.viewerTitle.textContent = `${MODEL_LABEL} Winter Graphics`;
+    els.caption.textContent = `${MODEL_LABEL} winter graphics · Awaiting first published run`;
+    empty(`Awaiting ${MODEL_LABEL} winter graphics`,
       'Published forecast maps will appear here when the first model run is available on AWS S3.');
     status(message, level);
   }
   function validatedIndexEntries(json) {
     if (!json || !Array.isArray(json.runs)) throw new Error('runs.json must contain a runs array');
+    if (json.model && json.model !== MODEL_ID) throw new Error(`Expected ${MODEL_LABEL} runs.json, found ${json.model}`);
     const unique = new Map();
     for (const item of json.runs) {
       if (!item || !/^\d{10}$/.test(String(item.cycle ?? ''))) continue;
-      if (!Number.isInteger(item.forecast_hour) || item.forecast_hour <= 0 || item.forecast_hour > 120) continue;
+      if (!Number.isInteger(item.forecast_hour) || item.forecast_hour < 0 || item.forecast_hour > 120) continue;
       if (item.manifest !== `${item.cycle}/manifest_f${String(item.forecast_hour).padStart(3, '0')}.json`) continue;
       unique.set(item.cycle + ':' + item.forecast_hour, item);
     }
@@ -546,7 +591,7 @@
           {cache: 'no-store'});
         if (response.ok) {
           const latest = await response.json();
-          if (latest.model === 'rrfs_mpas' && latest.cycle === previousCycle &&
+          if (latest.model === MODEL_ID && latest.cycle === previousCycle &&
               latest.forecast_hour === previousHour && latest.domains) {
             manifestCache.set(selected.manifest, latest);
             if (state.cycle === previousCycle && state.hour === previousHour && !state.playing &&
@@ -634,7 +679,7 @@
         const response = await fetch(dataUrl(key));
         if (!response.ok) throw new Error(`HTTP ${response.status} reading ${key}`);
         manifest = await response.json();
-        if (manifest.model !== 'rrfs_mpas' || manifest.cycle !== selected.cycle ||
+        if (manifest.model !== MODEL_ID || manifest.cycle !== selected.cycle ||
             manifest.forecast_hour !== selected.forecast_hour ||
             !manifest.domains || typeof manifest.domains !== 'object') {
           throw new Error('Manifest does not match the selected model hour');
@@ -672,7 +717,7 @@
     const keys = sortedKeys(catalog);
     if (!keys.length) {
       empty('No maps for this domain', `No ${DOMAIN_LABELS[state.domain]} maps are published for ${fmtHour(state.hour)}.`);
-      els.title.textContent = 'RRFS-MPAS | No published maps';
+      els.title.textContent = `${MODEL_LABEL} | No published maps`;
       for (const slot of ['rightProduct','thirdProduct','fourthProduct'])
         emptyExtra(slot, 'Not available', 'No maps published for this domain and hour.');
       return false;
@@ -734,7 +779,7 @@
           state.imageUrl=url;
           state.leftLoaded=true;
           els.empty.hidden=true;
-          els.title.textContent=isCompare() ? productLabel(state.product) : `RRFS-MPAS | ${productLabel(state.product)}`;
+          els.title.textContent=isCompare() ? productLabel(state.product) : `${MODEL_LABEL} | ${productLabel(state.product)}`;
           els.meta.textContent=`${DOMAIN_LABELS[domain].toUpperCase()} · ${fmtHour(hour)}`;
           els.caption.textContent=`${cycle}Z run · Valid ${utcTime(manifest.valid_time_utc)} · ${DOMAIN_LABELS[domain]}`;
           els.fullLink.href=url;
@@ -749,8 +794,8 @@
           els[p.link].hidden=false;
         }
       }
-      els.viewerTitle.textContent = isFour() ? 'RRFS-MPAS Four-Panel Comparison' :
-        isCompare() ? 'RRFS-MPAS Product Comparison' : `RRFS-MPAS ${productLabel(state.product)}`;
+      els.viewerTitle.textContent = isFour() ? `${MODEL_LABEL} Four-Panel Comparison` :
+        isCompare() ? `${MODEL_LABEL} Product Comparison` : `${MODEL_LABEL} ${productLabel(state.product)}`;
       updateSaveButton();
       void prefetchNextHour(cycle, hour, domain, active.map(slot => state[slot]));
       // Hour navigation may advance even when a single optional product is
@@ -879,7 +924,7 @@
     if (!urls.every(Boolean)) return;
     els.save.disabled=true;
     const mode = isFour() ? 'four_panel' : isCompare() ? 'two_panel' : 'single';
-    const filename=`rrfs_mpas_winter_${mode}_${slots.map(s => state[s]).join('_vs_')}_${state.domain}_${state.cycle}_f${String(state.hour).padStart(3,'0')}.png`;
+    const filename=`${MODEL_ID}_winter_${mode}_${slots.map(s => state[s]).join('_vs_')}_${state.domain}_${state.cycle}_f${String(state.hour).padStart(3,'0')}.png`;
     try {
       const blobs=await Promise.all(urls.map(async url => {
         const response=await fetch(url);
