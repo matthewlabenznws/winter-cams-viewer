@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#111111">
-  <meta name="description" content="Winter CAMs forecast viewer for HRRR and RRFS-MPAS graphics across the North Platte region.">
+  <meta name="description" content="Winter CAMs forecast viewer for HRRR, operational RRFS, and RRFS-MPAS graphics across the North Platte region.">
   <title>Winter CAMs Viewer | North Platte</title>
   <link rel="stylesheet" href="assets/site.css">
   <script src="assets/config.js" defer></script>
@@ -20,7 +20,7 @@
     <nav class="subbar model-nav" aria-label="Winter forecast models">
       <a class="model-link" id="navHrrr" href="index.html?model=hrrr">HRRR</a>
       <span class="nav-divider" aria-hidden="true">/</span>
-      <span class="model-coming" title="RRFS winter graphics will be added later">RRFS</span>
+      <a class="model-link" id="navRrfs" href="index.html?model=rrfs">RRFS</a>
       <span class="nav-divider" aria-hidden="true">/</span>
       <a class="model-link" id="navRrfsMpas" href="index.html?model=rrfs_mpas">RRFS-MPAS</a>
     </nav>
@@ -38,7 +38,7 @@
       <select id="modelSelect" aria-label="Model">
         <option value="rrfs_mpas">RRFS-MPAS</option>
         <option value="hrrr">HRRR</option>
-        <option value="rrfs" disabled>RRFS (coming later)</option>
+        <option value="rrfs">RRFS</option>
       </select>
       <label for="productSelect">Product:</label>
       <select id="productSelect" aria-label="Product" disabled>
