@@ -1,14 +1,13 @@
 name: RRFS Winter | Hourly Cycles
 
-# GitHub Actions checks hourly for NEW 3-hourly operational NCEP RRFS prslev/2dfld runs.
+# Triggered by cron-job.org every three hours at :55 UTC via workflow_dispatch.
 # LATEST processes the newest three eligible cycles plus the most recent extended cycle, resuming via S3.
-# Do not also enable cron-job.org for this same RRFS workflow. For first AWS test, use max_hours=1 and publish=true;
+# No built-in schedule; cron-job.org triggers this workflow. For first AWS test, use max_hours=1 and publish=true;
 # then default max_hours=0 and forecast_hours=ALL to resume all available hours.
+# Processing has no application-level wall-time cutoff; exit when caught up or idle.
 # Sequential workflow queue: this prevents S3 index races and avoids cancelling
 # pending runs if processing takes longer than expected.
 on:
-  schedule:
-    - cron: '55 * * * *'
   workflow_dispatch:
     inputs:
       cycle:
@@ -26,11 +25,6 @@ on:
         type: string
         required: true
         default: '0'
-      time_budget_minutes:
-        description: 'Stop between forecast hours near this runtime; next cron run resumes from S3'
-        type: string
-        required: true
-        default: '55'
       idle_wait_minutes:
         description: 'Maximum minutes to poll when waiting for new forecast-hour files'
         type: string
@@ -74,7 +68,7 @@ concurrency:
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 110
+    timeout-minutes: 360  # GitHub-hosted runner hard maximum: 6 hours
     env:
       PYTHONUNBUFFERED: '1'
       MPLBACKEND: Agg
@@ -144,13 +138,12 @@ jobs:
             done
           fi
 
-      - name: Plot the latest RRFS cycles and resume their unfinished forecast hours
+      - name: Process all available RRFS hours (no application time limit)
         shell: bash
         env:
           CYCLE: ${{ inputs.cycle || 'LATEST' }}
           HOURS: ${{ inputs.forecast_hours || 'ALL' }}
           MAX_HOURS: ${{ inputs.max_hours || '0' }}
-          BUDGET: ${{ inputs.time_budget_minutes || '55' }}
           LOOKBACK: ${{ inputs.lookback_hours || '24' }}
           IDLE_WAIT: ${{ inputs.idle_wait_minutes || '5' }}
           POLL_SECONDS: ${{ inputs.poll_seconds || '90' }}
@@ -160,7 +153,7 @@ jobs:
         run: |
           cmd=(python scripts/process_rrfs_hourly.py
             --cycle "$CYCLE" --hours "$HOURS" --max-hours "$MAX_HOURS"
-            --domains "$DOMAINS" --max-wall-minutes "$BUDGET"
+            --domains "$DOMAINS" --max-wall-minutes 0
             --lookback-hours "$LOOKBACK" --keep-going
             --idle-wait-minutes "$IDLE_WAIT" --poll-seconds "$POLL_SECONDS")
           if [[ ( "$CYCLE" == 'LATEST' || "$CYCLE" == 'PRIORITY' ) && "$HOURS" == 'ALL' && "$PUBLISH" == 'true' ]]; then
