@@ -22,6 +22,7 @@ import re
 
 PREFIX = 'runs/cams/hrrr/winter'
 INDEX_KEY = PREFIX + '/runs.json'
+KEEP_LATEST_CYCLES = 6  # Retain all published forecast hours for six newest runs
 
 
 def get_site_root(stage: Path) -> Path:
@@ -89,23 +90,32 @@ def validate_local_run(root: Path, cycle: str | None = None,
     return sorted(set(pngs)), entries
 
 
-def merge_index(remote: dict | None, new_entries: list[dict], max_entries: int=5000) -> dict:
-    """Keep previously uploaded cycle/FHR entries; never replace with only current hour."""
+def merge_index(remote: dict | None, new_entries: list[dict],
+                max_cycles: int = KEEP_LATEST_CYCLES) -> dict:
+    """Show all forecast hours belonging to the most recent six model cycles.
+
+    This limits runs.json only; older PNGs and manifests remain in S3.
+    """
     old = remote if isinstance(remote, dict) else {}
     prior = old.get('runs', [])
-    unique: dict[tuple[str,int],dict] = {}
+    unique: dict[tuple[str, int], dict] = {}
     for entry in prior if isinstance(prior, list) else []:
-        if isinstance(entry, dict) and re.fullmatch(r'\d{10}',str(entry.get('cycle',''))):
+        if isinstance(entry, dict) and re.fullmatch(r'\d{10}', str(entry.get('cycle', ''))):
             try:
-                unique[(entry['cycle'],int(entry['forecast_hour']))] = entry
-            except (KeyError,ValueError,TypeError):
+                unique[(entry['cycle'], int(entry['forecast_hour']))] = entry
+            except (KeyError, ValueError, TypeError):
                 pass
     for entry in new_entries:
-        unique[(entry['cycle'],entry['forecast_hour'])] = entry
-    sorted_entries = sorted(unique.values(),key=lambda x:(x['cycle'],int(x['forecast_hour'])),reverse=True)
-    return {'schema_version':1,'model':'hrrr','experimental':False,
-            'updated_utc':datetime.now(timezone.utc).isoformat().replace('+00:00','Z'),
-            'runs':sorted_entries[:max_entries]}
+        unique[(entry['cycle'], int(entry['forecast_hour']))] = entry
+    newest_cycles = set(sorted({cycle for cycle, _ in unique}, reverse=True)[:max_cycles])
+    sorted_entries = sorted(
+        (entry for entry in unique.values() if entry['cycle'] in newest_cycles),
+        key=lambda x: (x['cycle'], int(x['forecast_hour'])),
+        reverse=True,
+    )
+    return {'schema_version': 1, 'model': 'hrrr', 'experimental': False,
+            'updated_utc': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+            'runs': sorted_entries}
 
 
 def connect_s3():
