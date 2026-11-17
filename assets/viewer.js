@@ -1,4 +1,4 @@
-/* Shared Winter CAMs viewer — one frontend for HRRR and RRFS-MPAS.
+/* Shared Winter CAMs viewer — one frontend for HRRR, operational RRFS, and RRFS-MPAS.
    Both use the same run-index/manifest/PNG schema, under different S3 prefixes.
    Choose a model in the existing dropdown; no second hrrr_viewer.js needed.
    No AWS credentials belong in browser code. */
@@ -7,11 +7,12 @@
 
   const cfg = window.WINTER_CAMS_CONFIG || {};
   const BASE_URL = String(cfg.dataBaseUrl || '').replace(/\/+$/, '');
-  const MODEL_IDS = ['rrfs_mpas', 'hrrr'];
-  const MODEL_LABELS = { rrfs_mpas: 'RRFS-MPAS', hrrr: 'HRRR' };
+  const MODEL_IDS = ['rrfs_mpas', 'hrrr', 'rrfs'];
+  const MODEL_LABELS = { rrfs_mpas: 'RRFS-MPAS', hrrr: 'HRRR', rrfs: 'RRFS' };
   const MODEL_PREFIXES = {
     rrfs_mpas: String(cfg.modelPrefixes?.rrfs_mpas || cfg.prefix || 'runs/cams/rrfs_mpas/winter/').replace(/^\/+|\/+$/g, '') + '/',
-    hrrr: String(cfg.modelPrefixes?.hrrr || 'runs/cams/hrrr/winter/').replace(/^\/+|\/+$/g, '') + '/'
+    hrrr: String(cfg.modelPrefixes?.hrrr || 'runs/cams/hrrr/winter/').replace(/^\/+|\/+$/g, '') + '/',
+    rrfs: String(cfg.modelPrefixes?.rrfs || 'runs/cams/rrfs/winter/').replace(/^\/+|\/+$/g, '') + '/'
   };
   const modelParam = new URLSearchParams(location.search).get('model');
   const MODEL_ID = MODEL_IDS.includes(modelParam) ? modelParam : 'rrfs_mpas';
@@ -136,7 +137,7 @@
       window.location.assign(url.toString());
     });
   }
-  for (const [id, model] of [['navHrrr', 'hrrr'], ['navRrfsMpas', 'rrfs_mpas']]) {
+  for (const [id, model] of [['navHrrr', 'hrrr'], ['navRrfs', 'rrfs'], ['navRrfsMpas', 'rrfs_mpas']]) {
     const link = byId(id);
     if (!link) continue;
     const active = model === MODEL_ID;
