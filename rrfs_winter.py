@@ -316,7 +316,7 @@ def field_definitions(fhr: int):
         'v10m': lambda k: k[:3] == (0, 2, 3) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
         'rh2m': lambda k: k[:3] == (0, 1, 1) and k[3:5] == ('heightAboveGround', 2) and k[5] == 'instant',
         'd2m': lambda k: k[:3] == (0, 0, 6) and k[3:5] == ('heightAboveGround', 2) and k[5] == 'instant',
-        'mslp': lambda k: k[:3] in ((0, 3, 198), (0, 3, 1)) and k[3] == 'meanSea' and k[5] == 'instant',
+        'mslp': lambda k: k[:3] in ((0, 3, 192), (0, 3, 198), (0, 3, 1)) and k[3] in ('meanSea', 'meanSeaLevel') and k[5] == 'instant',
         'psfc':   lambda k: k[:3] == (0, 3, 0) and k[3] == 'surface' and k[5] == 'instant',
         'gh500':  lambda k: k[:3] == (0, 3, 5) and k[3:5] == ('isobaricInhPa', 500),
         'gh925':  lambda k: k[:3] == (0, 3, 5) and k[3:5] == ('isobaricInhPa', 925),
@@ -356,6 +356,11 @@ def read_selected_fields(grib_path: Path, fhr: int):
             index += 1
             try:
                 key = field_key(gid)
+                if key[:2] == (0, 3) and key[3] in ('meanSea', 'meanSeaLevel'):
+                    print('  GRIB MSLP candidate:',
+                          str(meta(gid, 'shortName', '?')),
+                          'parameter=', key[:3], 'level=', key[3],
+                          'step=', key[5], flush=True)
                 if key[:3] in ((0,1,29),(0,1,13),(0,1,11)):
                     print('  SNOW INVENTORY',
                           str(meta(gid,'shortName','?')),
