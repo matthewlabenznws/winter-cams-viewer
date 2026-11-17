@@ -155,13 +155,14 @@ def download_selected_grib(model: str, cycle: str, fhr: int,
         raise ValueError('Standard RRFS prslev/2dfld files are only available every three model cycles')
     if not 0 <= fhr <= horizon(cycle):
         raise ValueError(f'F{fhr:03d} exceeds the {cycle} horizon')
-    from datetime import datetime, timezone
+    from datetime import datetime
     from tempfile import TemporaryDirectory
     from herbie import Herbie
 
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    target = datetime.strptime(cycle, '%Y%m%d%H').replace(tzinfo=timezone.utc)
+    # Herbie expects a timezone-naive UTC initialization timestamp.
+    target = datetime.strptime(cycle, '%Y%m%d%H')
     temporary = destination.with_suffix(destination.suffix + '.part')
     try:
         with TemporaryDirectory(prefix='herbie_rrfs_', dir=destination.parent) as workdir:
