@@ -225,11 +225,11 @@ HEIGHT_CONTOUR_ZORDER = 110
 CONTOUR_LABEL_ZORDER = 160
 HEIGHT_LABEL_ZORDER = 165
 PRESSURE_CENTER_ZORDER = 800  # H/L symbols and pressure values above weather overlays
-MAP_CREDIT_ZORDER = 850  # map credit stays above all plotted contours
-MAP_TITLE_ZORDER = 950  # title/date/init labels above weather layers
+MAP_CREDIT_ZORDER = 1970  # preserve top-of-map annotation over meteorological layers
+MAP_TITLE_ZORDER = 1980  # preserve top-of-map annotation over meteorological layers
 TEMP_CONTOUR_RED = '#dc1428'  # stronger red on all nonzero isotherms
-OFFICE_LABEL_ZORDER = 900     # NWS office label above all plotted weather layers
-LOGO_ZORDER = 1000          # inset axes must stack above parent-axis contours/labels
+OFFICE_LABEL_ZORDER = 1990  # preserve top-of-map annotation over meteorological layers
+LOGO_ZORDER = 2000  # NOAA/NWS composite is the topmost map layer
 CAM_STYLE_LOGO = True        # NOAA/NWS logos embedded in PNGs for all map domains
 FIGURE_DPI = 140  # exact RRFS CAMs save DPI
 CAMS_SAVE_TIGHT = True  # same bbox_inches='tight' setting as RRFS CAMs
@@ -1245,14 +1245,24 @@ def new_map(title, subtitle, ptype=False):
     ax.text(1.0,1.005,init_title,transform=ax.transAxes,ha='right',va='bottom',
             fontsize=subtitle_size,weight='bold',clip_on=False,zorder=MAP_TITLE_ZORDER)
 
-    # Inset logo and credit duplicate the existing CAMs severe-product style.
+    # Logos are composited onto opaque white *before* drawing.  The source
+    # PNG can contain transparency, which otherwise lets map contours show
+    # through it regardless of the inset axes z-order.
     if CAM_STYLE_LOGO and LOGO_PATH and Path(LOGO_PATH).is_file():
         try:
             from matplotlib.image import imread
-            logo_ax=ax.inset_axes([.82,.84,.165,.155],
-                                  transform=ax.transAxes,zorder=LOGO_ZORDER)
-            logo_ax.imshow(imread(LOGO_PATH))
-            logo_ax.axis('off')
+            logo_pixels = np.asarray(imread(LOGO_PATH))
+            if logo_pixels.ndim == 3 and logo_pixels.shape[-1] == 4:
+                # PNGs can be float RGBA (0..1) or integer RGBA (0..255).
+                scale = float(np.iinfo(logo_pixels.dtype).max) if np.issubdtype(logo_pixels.dtype, np.integer) else 1.0
+                rgb = logo_pixels[..., :3].astype(np.float32) / scale
+                alpha = logo_pixels[..., 3:4].astype(np.float32) / scale
+                logo_pixels = rgb * alpha + (1.0 - alpha)
+            logo_ax = ax.inset_axes([.82,.84,.165,.155], transform=ax.transAxes)
+            logo_ax.set_zorder(LOGO_ZORDER)
+            logo_ax.imshow(logo_pixels, interpolation='none', zorder=LOGO_ZORDER + 1)
+            logo_ax.set_axis_off()
+            logo_ax.patch.set_alpha(0.0)
         except Exception as exc:
             print('Logo rendering error:',str(exc)[:150])
     # Office label is the topmost map annotation: preserve legibility even
@@ -1260,6 +1270,8 @@ def new_map(title, subtitle, ptype=False):
     ax.text(.902,.835,'NWS North Platte, NE',transform=ax.transAxes,
             ha='center',va='top',fontsize=10,weight='bold',color='black',
             zorder=OFFICE_LABEL_ZORDER,
+            bbox=dict(facecolor='white', edgecolor='none', alpha=1.0,
+                      boxstyle='square,pad=0.10'),
             path_effects=[pe.withStroke(linewidth=2.5,foreground='white')])
     ax.text(.01,.015,MAP_CREDIT,transform=ax.transAxes,ha='left',va='bottom',
             fontsize=9,weight='bold',color='black',zorder=MAP_CREDIT_ZORDER,
