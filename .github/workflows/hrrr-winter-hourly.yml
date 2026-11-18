@@ -1,7 +1,12 @@
+# Operational HRRR automatic selection fix (cron-job.org)
+# All scheduled dispatches select newest available NOAA HRRR cycle (AUTO).
+# Backfill requires BOTH allow_backfill=true and cycle=YYYYMMDDHH / PRIORITY / LATEST.
+# This preserves explicit manual repair without letting old cron requests start backlogs.
 name: HRRR Winter | Hourly Cycles
 
 # No GitHub cron: cron-job.org will use workflow_dispatch hourly.
-# PRIORITY processes the most recent three cycles plus the latest extended run, resuming via S3.
+# Cron dispatches ALWAYS use AUTO unless allow_backfill is explicitly enabled.
+# This prevents old cron-job.org payloads from accidentally selecting PRIORITY.
 # Existing cron-job.org workflow_dispatch may run hourly. If already set up, do not
 # create a duplicate cron. For first AWS test, use max_hours=1 and publish=true;
 # then default max_hours=0 and forecast_hours=ALL to resume all available hours.
@@ -11,10 +16,15 @@ on:
   workflow_dispatch:
     inputs:
       cycle:
-        description: 'PRIORITY/LATEST newest 3 cycles plus extended; AUTO newest only; YYYYMMDDHH exact'
+        description: 'Cycle for an explicitly enabled manual backfill; automatic runs always use AUTO'
         type: string
         required: true
-        default: 'PRIORITY'
+        default: 'AUTO'
+      allow_backfill:
+        description: 'Manual backfill only: explicitly permit the cycle input above (leave false for cron-job.org)'
+        type: boolean
+        required: true
+        default: false
       forecast_hours:
         description: 'ALL = F000 to F018/F048, or select 006 / 006-012'
         type: string
@@ -41,10 +51,10 @@ on:
         required: true
         default: '90'
       lookback_hours:
-        description: 'UTC hours to look back for all unfinished hourly cycles; explicit cycle ignores this'
+        description: 'UTC hours to search for the newest cycle; explicit cycle ignores this'
         type: string
         required: true
-        default: '72'
+        default: '12'
       domains:
         description: 'One or more: lbf,regional,central_plains'
         type: string
@@ -146,17 +156,21 @@ jobs:
       - name: Plot the latest HRRR cycles and resume their unfinished forecast hours
         shell: bash
         env:
-          CYCLE: ${{ inputs.cycle || 'PRIORITY' }}
+          CYCLE: ${{ inputs.allow_backfill == true && inputs.cycle || 'AUTO' }}
           HOURS: ${{ inputs.forecast_hours || 'ALL' }}
           MAX_HOURS: ${{ inputs.max_hours || '0' }}
           BUDGET: ${{ inputs.time_budget_minutes || '55' }}
-          LOOKBACK: ${{ inputs.lookback_hours || '72' }}
+          LOOKBACK: ${{ inputs.lookback_hours || '12' }}
           IDLE_WAIT: ${{ inputs.idle_wait_minutes || '15' }}
           POLL_SECONDS: ${{ inputs.poll_seconds || '90' }}
           DOMAINS: ${{ inputs.domains || 'lbf,regional,central_plains' }}
           PUBLISH: ${{ inputs.publish == true && 'true' || 'false' }}
           REBUILD: ${{ inputs.rebuild_existing_hours == true && 'true' || 'false' }}
         run: |
+          echo "Requested cycle: ${{ inputs.cycle || 'AUTO' }}"
+          echo "Manual backfill enabled: ${{ inputs.allow_backfill || false }}"
+          echo "Effective HRRR cycle selection: $CYCLE"
+          echo "Source inventory lookback: $LOOKBACK hours"
           cmd=(python scripts/process_hrrr_hourly.py
             --cycle "$CYCLE" --hours "$HOURS" --max-hours "$MAX_HOURS"
             --domains "$DOMAINS" --max-wall-minutes "$BUDGET"
