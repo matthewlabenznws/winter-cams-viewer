@@ -34,7 +34,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
-from ftplib import FTP
 from urllib.request import urlretrieve
 from pathlib import Path
 import json
@@ -63,10 +62,6 @@ from eccodes import codes_grib_new_from_file, codes_get, codes_get_array, codes_
 # ──────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
 
-FTP_HOST = 'gsdftp.fsl.noaa.gov'
-FTP_DIR = '/ncar/upp/det'
-# Anonymous FTP requires an email-shaped password; enter your own address.
-FTP_EMAIL = os.getenv('GSL_FTP_EMAIL', 'your_email@example.com')
 CYCLE_ID = os.getenv('WINTER_CYCLE', 'AUTO').strip().upper()  # YYYYMMDDHH or AUTO
 FORECAST_HOUR = int(os.getenv('WINTER_FHR', '6'))  # one forecast hour per job
 # Concurrent PNG rendering per domain on Linux GitHub runners.
@@ -314,7 +309,7 @@ def field_definitions(fhr: int):
                     and k[5] == 'accum' and k[6] == f'0-{fhr}',
         't2m':    lambda k: k[:3] == (0, 0, 0) and k[3:5] == ('heightAboveGround', 2),
         # Native HRRR surface fields confirmed in the F001/F006/F024
-        # GSL inventory (GRIB2 identifiers, not ecCodes short names).
+        # HRRR GRIB2 field identifiers (not ecCodes short names).
         'gust10m': lambda k: k[:3] == (0, 2, 22) and k[3] in ('surface', 'heightAboveGround') and k[5] == 'instant',
         'u10m': lambda k: k[:3] == (0, 2, 2) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
         'v10m': lambda k: k[:3] == (0, 2, 3) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
@@ -1480,7 +1475,7 @@ def label_pressure_centers(ax, lat, lon, pressure_hpa):
 
 
 def overlay_thickness_mslp(ax, lat, lon, fields, label_style=False):
-    """Red dashed thickness every 6 dam, black MSLP every 2 hPa.
+    """Blue dashed thickness below 540 dam, solid blue 540, red dashed above; black MSLP.
 
     Contour labels are less frequent to prevent collisions on the winter P-type
     shading, without reducing the number of contour lines themselves.
@@ -1497,19 +1492,41 @@ def overlay_thickness_mslp(ax, lat, lon, fields, label_style=False):
     if not np.isfinite(th).any() or not np.isfinite(ps).any():
         return False
 
+    # 1000–500-mb thickness: blue dashed below 540 dam, solid blue at
+    # 540 dam, and red dashed above 540 dam. MSLP contours remain black.
     tstep=THICKNESS_CONTOUR_INTERVAL_DAM
     tlevels=np.arange(480,618,tstep)
-    if tlevels.size:
-        ct=ax.contour(tx,ty,th,levels=tlevels,colors='#ce1818',
-                      linestyles='dashed',linewidths=1.12,
+    # Always include the 540-dam reference contour, even if tstep changes.
+    if not np.any(np.isclose(tlevels,540)):
+        tlevels=np.sort(np.append(tlevels,540))
+
+    # Each color group is drawn separately. Exclude out-of-range values so
+    # Matplotlib never substitutes an unwanted contour at the data minimum.
+    th_min=float(np.nanmin(th))
+    th_max=float(np.nanmax(th))
+
+    def plot_thickness_levels(selected_levels, color, linestyle, linewidth,
+                              label_reference=False):
+        selected_levels=selected_levels[(selected_levels>=th_min) &
+                                       (selected_levels<=th_max)]
+        if not len(selected_levels):
+            return
+        ct=ax.contour(tx,ty,th,levels=selected_levels,colors=color,
+                      linestyles=linestyle,linewidths=linewidth,
                       transform=PLATE,zorder=THICKNESS_CONTOUR_ZORDER)
-        label_levels=[lev for lev in tlevels
-                      if lev%THICKNESS_LABEL_INTERVAL_DAM==0]
+        label_levels=([540] if label_reference else
+                      [lev for lev in selected_levels
+                       if np.isclose(lev % THICKNESS_LABEL_INTERVAL_DAM,0)])
         if label_levels and any(len(x) for segs in ct.allsegs for x in segs):
             labels=ax.clabel(ct,levels=label_levels,fontsize=8.1,fmt='%d',
                              inline=True,inline_spacing=CONTOUR_LABEL_SPACING,
                              rightside_up=True)
             raise_contour_labels(labels,halo_width=2.1)
+
+    plot_thickness_levels(tlevels[tlevels<540], '#1f5fd1', 'dashed', 1.12)
+    plot_thickness_levels(tlevels[np.isclose(tlevels,540)], '#1f5fd1',
+                          'solid', 1.28, label_reference=True)
+    plot_thickness_levels(tlevels[tlevels>540], '#ce1818', 'dashed', 1.12)
 
     step=MSLP_CONTOUR_INTERVAL_HPA
     m0=int(np.floor(np.nanmin(ps)/step)*step)
@@ -1526,7 +1543,7 @@ def overlay_thickness_mslp(ax, lat, lon, fields, label_style=False):
             raise_contour_labels(labels,halo_width=2.1)
     label_pressure_centers(ax,lat,lon,p)
     if label_style:
-        ax.text(.02,.055,'MSLP: 2-hPa black contours  |  Thickness: 6-dam red dashed',
+        ax.text(.02,.055,'MSLP: black 2 hPa | Thickness: blue dashed <540, blue solid 540, red dashed >540 dam',
                 transform=ax.transAxes,fontsize=8.2,ha='left',va='bottom',
                 zorder=CONTOUR_LABEL_ZORDER,bbox=dict(facecolor='white',alpha=.85,edgecolor='none'))
     return True
@@ -2165,7 +2182,7 @@ def stage_site_run(payload):
     })
     entries.sort(key=lambda x: (x['cycle'], x['forecast_hour']), reverse=True)
     index_path.write_text(json.dumps({'schema_version':1,'model':'hrrr',
-                                     'experimental':True,'runs':entries},indent=2))
+                                     'experimental':False,'runs':entries},indent=2))
     print('Site-ready local files:', site)
     print('Site index:', index_path)
     return str(index_path)
