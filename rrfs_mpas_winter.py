@@ -1,6 +1,6 @@
-"""HRRR winter diagnostics — one-panel reference style + optional four-panel preview.
+"""RRFS-MPAS winter diagnostics — one-panel reference style + optional four-panel preview.
 
-Adapted from the verified HRRR data-access / earth-relative wind-rotation
+Adapted from the verified RRFS-MPAS data-access / earth-relative wind-rotation
 script and the supplied Model_1Panel.ipynb style.
 The actual Model_4Panel notebook was not available in this session; the optional
 2x2 preview is a NEW composite of the single-panel PNGs, not a reproduction of
@@ -32,8 +32,6 @@ this test script does not publish to AWS S3 or modify your existing site.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import get_context
 from ftplib import FTP
 from urllib.request import urlretrieve
 from pathlib import Path
@@ -67,17 +65,14 @@ FTP_HOST = 'gsdftp.fsl.noaa.gov'
 FTP_DIR = '/ncar/upp/det'
 # Anonymous FTP requires an email-shaped password; enter your own address.
 FTP_EMAIL = os.getenv('GSL_FTP_EMAIL', 'matthew.labenz@noaa.gov')
-CYCLE_ID = os.getenv('WINTER_CYCLE', 'AUTO').strip().upper()  # YYYYMMDDHH or AUTO
-FORECAST_HOUR = int(os.getenv('WINTER_FHR', '6'))  # one forecast hour per job
-# Concurrent PNG rendering per domain on Linux GitHub runners.
-# Only map plots are parallelized; GRIB download/decode, stage and S3 remain serialized.
-PLOT_WORKERS = int(os.getenv('WINTER_PLOT_WORKERS', '3'))
+CYCLE_ID = os.getenv('MPAS_CYCLE', 'AUTO').strip().upper()  # YYYYMMDDHH or AUTO
+FORECAST_HOUR = int(os.getenv('MPAS_FHR', '6'))  # one forecast hour per job
 LEVELS_HPA = (925, 850, 700)
 # Vorticity maps use three levels; do not add 500 mb to the original
 # temperature, wind-speed, or frontogenesis product loops.
 VORTICITY_LEVELS_HPA = (850, 700, 500)
 # These are the exact three geographic extents used in the existing CAMs viewer.
-# Download/decode Herbie HRRR GRIB once; produce matching products for selected domains.
+# Download/decode the MPAS GRIB once; produce matching products for selected domains.
 DOMAINS = {
     'lbf': (-103.8, -97.0, 40.0, 43.4),
     'regional': (-107.5, -93.0, 38.5, 44.2),
@@ -109,16 +104,16 @@ CAMS_DOMAIN_STYLE = {
 # Logo/credit overlays in supplied HRRR's plotting function are positioned
 # uniformly by ax.transAxes, while its domain dict above retains older
 # per-domain placement values.
-RUN_DOMAINS = tuple(x.strip() for x in os.getenv('WINTER_DOMAINS', 'lbf,regional,central_plains').split(',') if x.strip())
+RUN_DOMAINS = tuple(x.strip() for x in os.getenv('MPAS_DOMAINS', 'lbf,regional,central_plains').split(',') if x.strip())
 DOMAIN_NAME = RUN_DOMAINS[0]                       # set per domain inside run()
 EXTENT = DOMAINS[DOMAIN_NAME]                      # set per domain inside run()
-OUT_DIR = Path(os.getenv('WINTER_OUT_DIR', '/content/hrrr_winter_test' if Path('/content').exists() else './hrrr_winter_test'))
+OUT_DIR = Path(os.getenv('MPAS_OUT_DIR', '/content/rrfs_mpas_winter_test' if Path('/content').exists() else './rrfs_mpas_winter_test'))
 OUT_DIR.mkdir(exist_ok=True, parents=True)
 # Local-only folder layout for future S3/GitHub Winter CAMs viewer integration.
 # It does not connect to AWS, publish, or alter the current severe website.
 STAGE_SITE_FILES = True
 SITE_STAGING_ROOT = OUT_DIR / 'site_export'
-SITE_RELATIVE_PREFIX = Path('runs') / 'cams' / 'hrrr' / 'winter'
+SITE_RELATIVE_PREFIX = Path('runs') / 'cams' / 'rrfs_mpas' / 'winter'
 
 # Product toggles: set False to skip.
 DO_PTYPE = True
@@ -129,7 +124,7 @@ DO_ACCUM_SNOWFALL = True  # native 0-F snowfall (ASNOW)
 DO_SNOWFALL_10TO1 = True  # separate 10:1 estimate based on 0-F WEASD
 DO_SNOW_WATER_EQUIV = True # 0-F snow-water equiv (WEASD)
 DO_2M_TEMP = True
-# Additional native HRRR surface diagnostics.
+# Additional native RRFS-MPAS surface diagnostics.
 DO_10M_GUST = True          # instantaneous GUST, converted to mph
 DO_10M_WSPD_MSLP = True    # 10-m sustained U/V speed (mph), 2-mb MSLP contours and wind barbs
 DO_2M_RH = True             # native 2-m RH (%)
@@ -169,23 +164,23 @@ COUNTY_OUTSIDE_LINEWIDTH = 0.45
 DRAW_CWA_OUTLINE = True       # prominent black/white NWS LBF CWA boundary
 # Supply the same site assets as your CAMs viewer in /content/assets when available.
 # Missing assets are skipped (never invent a CWA boundary or logo).
-ASSET_DIR = Path(os.getenv('WINTER_ASSET_DIR', '/content/assets' if Path('/content').exists() else str(BASE_DIR / 'assets')))
-CWA_GEOJSON_PATH = os.getenv('WINTER_CWA_GEOJSON', '')
+ASSET_DIR = Path(os.getenv('MPAS_ASSET_DIR', '/content/assets' if Path('/content').exists() else str(BASE_DIR / 'assets')))
+CWA_GEOJSON_PATH = os.getenv('MPAS_CWA_GEOJSON', '')
 # Both published LBF forecast-office boundary naming conventions are recognized.
-# To use another source, set WINTER_CWA_SHP (or WINTER_CWA_GEOJSON).
-CWA_SHP_PATH = os.getenv('WINTER_CWA_SHP', str(ASSET_DIR / 'c_18mr25.shp'))
-CWA_ZIP_PATH = os.getenv('WINTER_CWA_ZIP', str(ASSET_DIR / 'c_18mr25.zip'))
-LOGO_PATH = os.getenv('WINTER_LOGO_PATH', str(ASSET_DIR / 'NOAANWSLogos.png'))
-COUNTY_SHP_PATH = os.getenv('WINTER_COUNTY_SHP', str(ASSET_DIR / 'cb_2018_us_county_500k.shp'))
-STATE_SHP_PATH = os.getenv('WINTER_STATE_SHP', str(ASSET_DIR / 'cb_2018_us_state_500k.shp'))
+# To use another source, set MPAS_CWA_SHP (or MPAS_CWA_GEOJSON).
+CWA_SHP_PATH = os.getenv('MPAS_CWA_SHP', str(ASSET_DIR / 'c_18mr25.shp'))
+CWA_ZIP_PATH = os.getenv('MPAS_CWA_ZIP', str(ASSET_DIR / 'c_18mr25.zip'))
+LOGO_PATH = os.getenv('MPAS_LOGO_PATH', str(ASSET_DIR / 'NOAANWSLogos.png'))
+COUNTY_SHP_PATH = os.getenv('MPAS_COUNTY_SHP', str(ASSET_DIR / 'cb_2018_us_county_500k.shp'))
+STATE_SHP_PATH = os.getenv('MPAS_STATE_SHP', str(ASSET_DIR / 'cb_2018_us_state_500k.shp'))
 # On CI publishing runs, do not silently upload plots without their office assets.
-REQUIRE_MAP_ASSETS = os.getenv('WINTER_REQUIRE_MAP_ASSETS', '0').strip().lower() in ('1','true','yes')
+REQUIRE_MAP_ASSETS = os.getenv('MPAS_REQUIRE_MAP_ASSETS', '0').strip().lower() in ('1','true','yes')
 
 # I-80 and I-76 on LBF maps only, using the TIGER/Line primary-roads shapefile
 # from the user's MRMS QPF notebook. No generated/approximate road coordinates.
 SHOW_LBF_INTERSTATE = True
-INTERSTATE_SHP_PATH = os.getenv('WINTER_ROADS_SHP', '/content/drive/MyDrive/Colab Notebooks/tl_2023_us_primaryroads.shp' if Path('/content').exists() else str(ASSET_DIR / 'tl_2023_us_primaryroads.shp'))
-FETCH_INTERSTATE_SHAPEFILE = os.getenv('WINTER_FETCH_ROADS', '1') == '1'  # CI only: official US Census shapefile
+INTERSTATE_SHP_PATH = os.getenv('MPAS_ROADS_SHP', '/content/drive/MyDrive/Colab Notebooks/tl_2023_us_primaryroads.shp' if Path('/content').exists() else str(ASSET_DIR / 'tl_2023_us_primaryroads.shp'))
+FETCH_INTERSTATE_SHAPEFILE = os.getenv('MPAS_FETCH_ROADS', '1') == '1'  # CI only: official US Census shapefile
 INTERSTATE_ROUTE_NUMBERS = ('80', '76')  # only these interstate routes, LBF domain
 INTERSTATE_COLOR = 'red'          # match original MRMS/QPF reference
 INTERSTATE_LINEWIDTH = 1.0
@@ -212,8 +207,8 @@ HL_MIN_SPACING_KM = 275      # reject closely clustered centers
 HL_BLACK_OUTLINE_PT = 3.2    # a single solid black stroke (no white inner outline)
 HL_LETTER_FONT_SIZE = 22
 HL_PRESSURE_FONT_SIZE = 13
-HL_PRESSURE_LAT_OFFSET = 0.24  # spacing for high centers
-HL_LOW_PRESSURE_LAT_OFFSET = 0.24  # same separation as H centers
+HL_PRESSURE_LAT_OFFSET = 0.18  # spacing for high centers
+HL_LOW_PRESSURE_LAT_OFFSET = 0.10  # bring L pressure value closer to the letter
 MSLP_LABEL_INTERVAL_HPA = 4  # ALL MSLP maps: draw every 2 mb, label every 4 mb
 THICKNESS_LABEL_INTERVAL_DAM = 12  # draw every 6 dam, label every 12 dam
 CONTOUR_LABEL_SPACING = 10
@@ -228,7 +223,7 @@ FGEN_CONTOUR_ZORDER = 100
 HEIGHT_CONTOUR_ZORDER = 110
 CONTOUR_LABEL_ZORDER = 160
 HEIGHT_LABEL_ZORDER = 165
-PRESSURE_CENTER_ZORDER = 800  # H/L symbols and pressure values above weather overlays
+PRESSURE_CENTER_ZORDER = 180
 MAP_CREDIT_ZORDER = 1970  # preserve top-of-map annotation over meteorological layers
 MAP_TITLE_ZORDER = 1980  # preserve top-of-map annotation over meteorological layers
 TEMP_CONTOUR_RED = '#dc1428'  # stronger red on all nonzero isotherms
@@ -248,19 +243,47 @@ PLOT_HEIGHT_CONTOURS = True     # when pressure-level geopotential height exists
 MAKE_FOUR_PANEL_PREVIEW = False  # optional per-domain montage; keep separate plots by default
 
 # ──────────────────────────────────────────────────────────────────
-# HRRR FIELD-SELECTIVE DOWNLOADS VIA HERBIE
+# FTP DISCOVERY / DOWNLOAD
 # ──────────────────────────────────────────────────────────────────
-from scripts.herbie_hrrr_fetch import download_selected_grib
+FILENAME_RE = re.compile(
+    r'^(?P<date>\d{8})(?P<cycle>\d{2})\.rrfs\.t(?P=cycle)z'
+    r'\.testbed\.f(?P<fhr>\d{3})\.conus\.grib2$'
+)
+
+
+def find_grib_filename(names: list[str]) -> tuple[str, str]:
+    candidates = []
+    for name in names:
+        base = Path(name).name
+        m = FILENAME_RE.fullmatch(base)
+        if not m or int(m['fhr']) != FORECAST_HOUR:
+            continue
+        cycle_id = m['date'] + m['cycle']
+        if CYCLE_ID != 'AUTO' and cycle_id != CYCLE_ID:
+            continue
+        candidates.append((cycle_id, base))
+    if not candidates:
+        raise FileNotFoundError(f'No MPAS testbed F{FORECAST_HOUR:03d} available for CYCLE_ID={CYCLE_ID}')
+    return max(candidates)  # lexicographically latest YYYYMMDDHH
 
 
 def download_grib() -> tuple[Path, str]:
-    if not re.fullmatch(r'\d{10}', CYCLE_ID):
-        raise ValueError('Use an explicit WINTER_CYCLE=YYYYMMDDHH for reproducible forecast-hour processing')
-    destination = OUT_DIR / f'hrrr_selected_{CYCLE_ID}_f{FORECAST_HOUR:03d}.grib2'
-    if not destination.is_file() or destination.stat().st_size < 1000:
-        download_selected_grib('hrrr', CYCLE_ID, FORECAST_HOUR, destination)
-    print('Selected GRIB size:', round(destination.stat().st_size/(1024**2), 1), 'MiB')
-    return destination, CYCLE_ID
+    print(f'Connecting to {FTP_HOST}{FTP_DIR}')
+    with FTP(FTP_HOST, timeout=120) as ftp:
+        ftp.set_pasv(True)
+        ftp.login('anonymous', FTP_EMAIL)
+        ftp.cwd(FTP_DIR)
+        cycle_id, filename = find_grib_filename(ftp.nlst())
+        destination = OUT_DIR / filename
+        print('Selected:', filename)
+        if not destination.exists() or destination.stat().st_size < 1_000_000:
+            with destination.open('wb') as output:
+                ftp.retrbinary(f'RETR {filename}', output.write, blocksize=1 << 20)
+        else:
+            print('Using already downloaded:', destination)
+    print('GRIB2 size (MiB):', round(destination.stat().st_size / (1024**2), 1))
+    return destination, cycle_id
+
 
 # ──────────────────────────────────────────────────────────────────
 # GRIB DECODING. Select unique fields by GRIB2 parameter + level,
@@ -289,14 +312,10 @@ def field_key(gid):
 def field_definitions(fhr: int):
     # Each candidate is a metadata predicate; first matching message accepted.
     defs = {
-        # Accept both standard (4/5) and NCEP local (195/196) reflectivity codes.
-        # The level and step checks exclude 4-km/263-K and hourly-maximum fields.
-        'ref1km': lambda k: (k[0:2] == (0, 16) and k[2] in (4, 195)
-                             and k[3:5] == ('heightAboveGround', 1000)
-                             and k[5] == 'instant'),
-        'refcomp': lambda k: (k[0:2] == (0, 16) and k[2] in (5, 196)
-                             and k[3] in ('atmosphereSingleLayer', 'atmosphere')
-                             and k[5] == 'instant'),
+        'ref1km': lambda k: k[:2] == (0, 16) and k[2] in (4, 195) and k[3:5] == ('heightAboveGround', 1000) and k[5] == 'instant',
+        # Composite reflectivity metadata can vary slightly by source.
+        # Accept the common GRIB2 identifier used by UPP/refc-style output.
+        'refcomp': lambda k: k[:2] == (0, 16) and k[2] in (5, 196) and k[3] in ('atmosphereSingleLayer', 'atmosphere') and k[5] == 'instant',
         'rain':   lambda k: k[:3] == (0, 1, 33) and k[3] == 'surface' and k[5] == 'instant',
         'snow':   lambda k: k[:3] == (0, 1, 36) and k[3] == 'surface' and k[5] == 'instant',
         'sleet':  lambda k: k[:3] == (0, 1, 35) and k[3] == 'surface' and k[5] == 'instant',
@@ -313,14 +332,14 @@ def field_definitions(fhr: int):
         'weasd': lambda k: k[:3] == (0, 1, 13) and k[3] == 'surface'
                     and k[5] == 'accum' and k[6] == f'0-{fhr}',
         't2m':    lambda k: k[:3] == (0, 0, 0) and k[3:5] == ('heightAboveGround', 2),
-        # Native HRRR surface fields confirmed in the F001/F006/F024
+        # Native RRFS-MPAS surface fields confirmed in the F001/F006/F024
         # GSL inventory (GRIB2 identifiers, not ecCodes short names).
-        'gust10m': lambda k: k[:3] == (0, 2, 22) and k[3] in ('surface', 'heightAboveGround') and k[5] == 'instant',
+        'gust10m': lambda k: k[:3] == (0, 2, 22) and k[3] == 'surface' and k[5] == 'instant',
         'u10m': lambda k: k[:3] == (0, 2, 2) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
         'v10m': lambda k: k[:3] == (0, 2, 3) and k[3:5] == ('heightAboveGround', 10) and k[5] == 'instant',
         'rh2m': lambda k: k[:3] == (0, 1, 1) and k[3:5] == ('heightAboveGround', 2) and k[5] == 'instant',
         'd2m': lambda k: k[:3] == (0, 0, 6) and k[3:5] == ('heightAboveGround', 2) and k[5] == 'instant',
-        'mslp': lambda k: k[:3] in ((0, 3, 198), (0, 3, 1)) and k[3] == 'meanSea' and k[5] == 'instant',
+        'mslp':   lambda k: k[:3] == (0, 3, 198) and k[3] == 'meanSea' and k[5] == 'instant',
         'psfc':   lambda k: k[:3] == (0, 3, 0) and k[3] == 'surface' and k[5] == 'instant',
         'gh500':  lambda k: k[:3] == (0, 3, 5) and k[3:5] == ('isobaricInhPa', 500),
         'gh925':  lambda k: k[:3] == (0, 3, 5) and k[3:5] == ('isobaricInhPa', 925),
@@ -414,7 +433,7 @@ def crop_to_domain(lat, lon, fields):
     mask = (lon >= lo) & (lon <= hi) & (lat >= south) & (lat <= north)
     jj, ii = np.where(mask)
     if len(jj) == 0:
-        raise ValueError(f'No HRRR gridpoints found inside {EXTENT}')
+        raise ValueError(f'No MPAS gridpoints found inside {EXTENT}')
     # Add padding for derivative stencils and Gaussian smoothing.
     buffer = 35
     j0, j1 = max(0, jj.min()-buffer), min(lat.shape[0], jj.max()+buffer+1)
@@ -466,7 +485,7 @@ def rotate_winds_to_earth(lat, lon, fields, uv_flags, wind_grid_meta):
     grid_type = wind_grid_meta['gridType'].lower()
     if grid_type != 'lambert':
         raise ValueError(f'Unsupported wind-rotation grid {grid_type!r}; ' 
-                         'this implementation is designed for HRRR Lambert GRIB2')
+                         'this implementation is designed for RRFS-MPAS Lambert GRIB2')
     if int(wind_grid_meta.get('jPointsAreConsecutive') or 0) != 0:
         raise ValueError('jPointsAreConsecutive=1 requires changing the GRIB reshape order')
     if int(wind_grid_meta.get('alternativeRowScanning') or 0) != 0:
@@ -567,7 +586,7 @@ def smooth(field, sigma):
 def calculate_relative_vorticity(lat, lon, fields, lev, grad):
     """Return 2-D relative vorticity on a pressure surface, in 10^-5 s^-1.
 
-    U and V must first be rotated from HRRR GRIB grid-relative winds
+    U and V must first be rotated from RRFS-MPAS GRIB grid-relative winds
     to true east/north using rotate_winds_to_earth(). Differentiate the
     (lightly smoothed) earth-relative vectors using the local geographic
     Jacobian rather than treating native Lambert i/j as east/north.
@@ -694,7 +713,7 @@ LBF_CITY_LABELS = [
 CITY_LABEL_SIZE = 8.4
 CITY_LABEL_COLOR = 'white'
 CITY_LABEL_OUTLINE = 1.8
-CITY_LABEL_ZORDER = 700     # city names and values above all meteorological layers
+CITY_LABEL_ZORDER = 200     # city names and values above contours, wind barbs and H/L centers
 CITY_LABEL_LAT_OFFSET = 0.0
 
 # Custom 2-m temperature colormap from the SPCOA page (-100 to 130 F, 1-degree bins).
@@ -741,7 +760,7 @@ WSPD_NORM = colors.BoundaryNorm(WSPD_BOUNDS, WSPD_CMAP.N, clip=True)
 WSPD_TICKS = np.arange(20, 82, 5)
 HEIGHT_CONTOUR_INTERVALS_DAM = {925: 3, 850: 3, 700: 3, 500: 3}  # 3 dam = 30 m
 
-# HRRR relative vorticity: exact SPCOA pressure-level color table.
+# RRFS-MPAS relative vorticity: exact SPCOA pressure-level color table.
 # Negative vorticity: black -> gray; neutral: white; positive: yellow -> red.
 # Field units after calculation are 10^-5 s^-1. 45 bins, 46 edges.
 VORTICITY_BOUNDS = np.arange(-40.0, 52.0, 2.0, dtype=np.float64)
@@ -1185,7 +1204,7 @@ def add_lbf_interstate(ax):
 
 
 def new_map(title, subtitle, ptype=False):
-    """Match the existing HRRR CAMs layout for every winter product.
+    """Match the existing RRFS-MPAS CAMs layout for every winter product.
 
     Geographic bounds are identical to CAMs. By default, figure construction
     and DPI follow the supplied HRRR CAMs code (14 x 10 in, PlateCarree,
@@ -1313,6 +1332,11 @@ def finish(fig, ax, fname, label=None, cf=None, colorbar_extend=None):
             cb.ax.xaxis.set_label_position('bottom')
             cb.ax.tick_params(axis='x', which='both', length=0, width=0,
                               labeltop=True, labelbottom=False, labelsize=8, pad=3)
+    # Watermark INSIDE the geographic plot, not in the white outer margin.
+    ax.text(.995,.012,'RRFS-MPAS GSL EXPERIMENTAL · evaluation only',
+            transform=ax.transAxes,ha='right',va='bottom',fontsize=8,
+            color='#333333',weight='bold',zorder=260,clip_on=True,
+            path_effects=[pe.withStroke(linewidth=2.4,foreground='white')])
     output_path=OUT_DIR/fname
     save_kwargs={'dpi':FIGURE_DPI,'facecolor':'white'}
     if CAMS_SAVE_TIGHT:
@@ -1327,7 +1351,7 @@ def title_info(cycle_id):
     init = datetime.strptime(cycle_id,'%Y%m%d%H').replace(tzinfo=timezone.utc)
     valid = init + timedelta(hours=FORECAST_HOUR)
     return (f'F{FORECAST_HOUR:03d} Valid: {valid:%a %Y-%m-%d %Hz} | '
-            f'Init: {init:%a %Y-%m-%d %Hz} HRRR')
+            f'Init: {init:%a %Y-%m-%d %Hz} RRFS-MPAS')
 
 
 def mesh_values(lon, lat, arr):
@@ -1580,7 +1604,7 @@ def plot_ptype(lat,lon,fields,cycle_id,reflectivity_field='ref1km'):
         phase_data[key]=np.where(is_phase,ref,0.)
 
     ref_label = '1-km Reflectivity' if reflectivity_field == 'ref1km' else 'Composite Reflectivity'
-    title = f'HRRR | MSLP, 1000–500 mb Thickness (dam), {ref_label} / P-Type'
+    title = f'RRFS-MPAS | MSLP, 1000–500 mb Thickness (dam), {ref_label} / P-Type'
     fig,ax=new_map(title, title_info(cycle_id), ptype=True)
 
     bounds=np.arange(5,61,5,dtype=np.float64)
@@ -1622,7 +1646,7 @@ def plot_ptype(lat,lon,fields,cycle_id,reflectivity_field='ref1km'):
         cb.ax.xaxis.set_label_position('top')
 
     suffix = 'ref1km' if reflectivity_field == 'ref1km' else 'refcomp'
-    filename=f'hrrr_ptype_{suffix}_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename=f'rrfs_mpas_ptype_{suffix}_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename)
     return filename
 
@@ -1733,7 +1757,7 @@ def plot_qpf(lat,lon,fields,cycle_id):
                    levels=QPF_BOUNDS,cmap=QPF_CMAP,norm=QPF_NORM,
                    transform=PLATE,zorder=2)
     add_lbf_city_values(ax,lat,lon,qpf_in,'qpf',inches_text, min_display_value=0.005)
-    filename=f'hrrr_qpf_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename=f'rrfs_mpas_qpf_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'Total Precipitation (inches)',cf)
     return filename
 
@@ -1751,7 +1775,7 @@ def plot_accumulated_snowfall(lat,lon,fields,cycle_id):
                    levels=SNOWFALL_BOUNDS,cmap=SNOWFALL_CMAP,
                    norm=SNOWFALL_NORM,transform=PLATE,zorder=2)
     add_lbf_city_values(ax,lat,lon,snow_inches,'asnow',snowfall_inches_text, min_display_value=0.05)
-    filename=f'hrrr_asnow_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename=f'rrfs_mpas_asnow_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'Accumulated Snowfall (inches)',cf)
     return filename
 
@@ -1775,7 +1799,7 @@ def plot_snowfall_10to1(lat,lon,fields,cycle_id):
                      levels=SNOWFALL_BOUNDS,cmap=SNOWFALL_CMAP,
                      norm=SNOWFALL_NORM,transform=PLATE,zorder=2)
     add_lbf_city_values(ax,lat,lon,snow_inches,'snow10to1',snowfall_inches_text, min_display_value=0.05)
-    filename = f'hrrr_snow10to1_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename = f'rrfs_mpas_snow10to1_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'10:1 Snowfall Estimate (inches)',cf)
     return filename
 
@@ -1793,7 +1817,7 @@ def plot_snow_water_equivalent(lat,lon,fields,cycle_id):
                    levels=QPF_BOUNDS,cmap=QPF_CMAP,norm=QPF_NORM,
                    transform=PLATE,zorder=2)
     add_lbf_city_values(ax,lat,lon,swe_inches,'weasd',inches_text, min_display_value=0.005)
-    filename=f'hrrr_weasd_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename=f'rrfs_mpas_weasd_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'Snow-water equivalent (inches)',cf)
     return filename
 
@@ -1808,7 +1832,7 @@ def plot_adv(lat,lon,diag,level,cycle_id,fields):
     contours_temp(ax,lon,lat,diag['temp_c'])
     contours_height(ax,lon,lat,fields,level)
     wind_barbs(ax,lon,lat,diag)
-    filename=f'hrrr_tadv_{level}mb_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename=f'rrfs_mpas_tadv_{level}mb_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,f'Temperature advection (°C/{TADV_HOURS} h)',cf)
     return filename
 
@@ -1836,7 +1860,7 @@ def plot_fgen(lat,lon,diag,level,cycle_id,fields):
     contours_temp(ax,lon,lat,diag['temp_c'])
     contours_height(ax,lon,lat,fields,level)
     wind_barbs(ax,lon,lat,diag)
-    filename=f'hrrr_fgen_{level}mb_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename=f'rrfs_mpas_fgen_{level}mb_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,f'Advection °C/{TADV_HOURS} h (shading); frontogenesis K/(100 km·3 h) (green)',cf)
     return filename
 
@@ -1848,7 +1872,7 @@ def plot_thickness(lat,lon,fields,cycle_id):
         return None
     fig,ax=new_map('1000–500 mb Thickness (dam) + MSLP (hPa)',title_info(cycle_id))
     overlay_thickness_mslp(ax,lat,lon,fields)
-    filename=f'hrrr_thickness_mslp_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename=f'rrfs_mpas_thickness_mslp_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename)
     return filename
 
@@ -1866,10 +1890,10 @@ def four_panel_preview(output_names,cycle_id):
     except ImportError:
         print('Skipping four-panel preview: pip install pillow')
         return None
-    wanted=[f'hrrr_ptype_ref1km_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png',
-            f'hrrr_qpf_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png',
-            f'hrrr_t2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png',
-            f'hrrr_fgen_850mb_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png']
+    wanted=[f'rrfs_mpas_ptype_ref1km_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png',
+            f'rrfs_mpas_qpf_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png',
+            f'rrfs_mpas_t2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png',
+            f'rrfs_mpas_fgen_850mb_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png']
     if any(fn not in output_names for fn in wanted):
         print('Four-panel preview skipped: one or more required products disabled/missing.')
         return None
@@ -1881,7 +1905,7 @@ def four_panel_preview(output_names,cycle_id):
         left=gap+(i%2)*(cell[0]+gap)+(cell[0]-tile.width)//2
         top=gap+(i//2)*(cell[1]+gap)+(cell[1]-tile.height)//2
         grid.paste(tile,(left,top))
-    name=f'hrrr_winter_4panel_preview_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    name=f'rrfs_mpas_winter_4panel_preview_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     grid.save(OUT_DIR/name,optimize=True)
     print('Saved:',OUT_DIR/name)
     return name
@@ -1925,13 +1949,13 @@ def plot_2m_temperature(lat, lon, fields, cycle_id):
         return None
     temp_f = (np.asarray(fields['t2m'], float) - 273.15) * 9.0 / 5.0 + 32.0
     x, y, z = mesh_values(lon, lat, smooth(temp_f, 1.2))
-    title = 'HRRR | 2-m Temperature'
+    title = 'RRFS-MPAS | 2-m Temperature'
     fig, ax = new_map(title, title_info(cycle_id))
     cf = ax.contourf(x, y, shade_at_palette_limits(z,SFC_TEMP_BOUNDS),
                      levels=SFC_TEMP_BOUNDS, cmap=SFC_TEMP_CMAP,
                      norm=SFC_TEMP_NORM,  transform=PLATE, zorder=2)
     add_lbf_city_values(ax,lat,lon,temp_f,'t2m',lambda v:f'{v:.0f}°F')
-    filename = f'hrrr_t2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename = f'rrfs_mpas_t2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig, ax, filename, label='2-m Temperature (°F)', cf=cf)
     return filename
 
@@ -1943,13 +1967,13 @@ def plot_10m_gust(lat, lon, fields, cycle_id):
         print('Skipping surface gusts: GRIB 0/2/22 GUST is missing')
         return None
     gust_mph = np.maximum(np.asarray(fields['gust10m'],float), 0.) * 2.2369362921
-    fig,ax = new_map('HRRR | 10-m Wind Gusts', title_info(cycle_id))
+    fig,ax = new_map('RRFS-MPAS | 10-m Wind Gusts', title_info(cycle_id))
     x,y,z = mesh_values(lon,lat,smooth(gust_mph,1.0))
     cf = ax.contourf(x,y,shade_at_palette_limits(z,GUST10M_BOUNDS),
                      levels=GUST10M_BOUNDS,cmap=GUST10M_CMAP,
                      norm=GUST10M_NORM,transform=PLATE,zorder=2)
     add_lbf_city_values(ax,lat,lon,gust_mph,'gust10m',lambda v:f'{v:.0f} mph')
-    filename = f'hrrr_gust10m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename = f'rrfs_mpas_gust10m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'10-m Wind Gust (mph)',cf)
     return filename
 
@@ -1975,7 +1999,7 @@ def plot_10m_sustained_wind_mslp(lat, lon, fields, cycle_id):
         print('Skipping 10-m sustained winds + MSLP: no finite data')
         return None
 
-    fig, ax = new_map('HRRR | 10-m Wind Speed + MSLP', title_info(cycle_id))
+    fig, ax = new_map('RRFS-MPAS | 10-m Wind Speed + MSLP', title_info(cycle_id))
     x, y, z = mesh_values(lon, lat, smooth(speed_mph, 1.0))
     cf = ax.contourf(x, y, shade_at_palette_limits(z, WSPD10M_BOUNDS),
                      levels=WSPD10M_BOUNDS, cmap=WSPD10M_CMAP,
@@ -2003,23 +2027,23 @@ def plot_10m_sustained_wind_mslp(lat, lon, fields, cycle_id):
     add_lbf_city_values(ax, lat, lon, speed_mph, 'wspd10m',
                         lambda value: f'{value:.0f} mph')
 
-    filename = f'hrrr_wspd10m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename = f'rrfs_mpas_wspd10m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig, ax, filename, label='10-m Wind Speed (mph)', cf=cf)
     return filename
 
 def plot_2m_rh(lat, lon, fields, cycle_id):
-    """Native 2-m RH, or T/Td-derived RH if the GRIB field is absent."""
+    """Native instantaneous 2-m RH; no humidity reconstruction needed."""
     if 'rh2m' not in fields:
         print('Skipping 2-m relative humidity: GRIB 0/1/1 field missing')
         return None
     rh = np.clip(np.asarray(fields['rh2m'],float),0.,100.)
-    fig,ax = new_map('HRRR | 2-m Relative Humidity',title_info(cycle_id))
+    fig,ax = new_map('RRFS-MPAS | 2-m Relative Humidity',title_info(cycle_id))
     x,y,z = mesh_values(lon,lat,smooth(rh,1.0))
     cf = ax.contourf(x,y,shade_at_palette_limits(z,RH2M_BOUNDS),
                      levels=RH2M_BOUNDS,cmap=RH2M_CMAP,norm=RH2M_NORM,
                      transform=PLATE,zorder=2)
     add_lbf_city_values(ax,lat,lon,rh,'rh2m',lambda v:f'{v:.0f}%')
-    filename = f'hrrr_rh2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename = f'rrfs_mpas_rh2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'2-m Relative Humidity (%)',cf)
     return filename
 
@@ -2029,13 +2053,13 @@ def plot_2m_dewpoint(lat, lon, fields, cycle_id):
         print('Skipping 2-m dewpoint: GRIB 0/0/6 field missing')
         return None
     dew_f = (np.asarray(fields['d2m'],float) - 273.15) * 1.8 + 32.
-    fig,ax = new_map('HRRR | 2-m Dewpoint',title_info(cycle_id))
+    fig,ax = new_map('RRFS-MPAS | 2-m Dewpoint',title_info(cycle_id))
     x,y,z = mesh_values(lon,lat,smooth(dew_f,1.0))
     cf = ax.contourf(x,y,shade_at_palette_limits(z,DEW2M_BOUNDS),
                      levels=DEW2M_BOUNDS,cmap=DEW2M_CMAP,norm=DEW2M_NORM,
                      transform=PLATE,zorder=2)
     add_lbf_city_values(ax,lat,lon,dew_f,'d2m',lambda v:f'{v:.0f}°F')
-    filename = f'hrrr_d2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename = f'rrfs_mpas_d2m_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig,ax,filename,'2-m Dewpoint (°F)',cf)
     return filename
 
@@ -2047,7 +2071,7 @@ def plot_level_temperature(lat, lon, fields, lev, cycle_id):
         return None
     temp_c = np.asarray(fields[tkey], float) - 273.15
     x, y, z = mesh_values(lon, lat, smooth(temp_c, 1.0))
-    title = f'HRRR | {lev} mb Temperature, Heights, and Winds'
+    title = f'RRFS-MPAS | {lev} mb Temperature, Heights, and Winds'
     fig, ax = new_map(title, title_info(cycle_id))
     cf = ax.contourf(x, y, shade_at_palette_limits(z,PRESSURE_TEMP_BOUNDS),
                      levels=PRESSURE_TEMP_BOUNDS,
@@ -2059,7 +2083,7 @@ def plot_level_temperature(lat, lon, fields, lev, cycle_id):
     wind_barbs(ax, lon, lat, {'u': np.asarray(fields[ukey], float),
                               'v': np.asarray(fields[vkey], float)})
     add_lbf_city_values(ax,lat,lon,temp_c,'pressure_temp',lambda v:f'{v:.0f}°C')
-    filename = f'hrrr_t{lev}_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename = f'rrfs_mpas_t{lev}_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig, ax, filename, label=f'{lev}-mb Temperature (°C)', cf=cf)
     return filename
 
@@ -2072,7 +2096,7 @@ def plot_level_windspeed(lat, lon, fields, lev, cycle_id):
         return None
     wspd = np.hypot(np.asarray(fields[ukey], float), np.asarray(fields[vkey], float)) * 1.943844
     x, y, z = mesh_values(lon, lat, smooth(wspd, 1.0))
-    title = f'HRRR | {lev} mb Wind Speed, Heights, and Winds'
+    title = f'RRFS-MPAS | {lev} mb Wind Speed, Heights, and Winds'
     fig, ax = new_map(title, title_info(cycle_id))
     cf = ax.contourf(x, y, shade_at_palette_limits(z,WSPD_BOUNDS),
                      levels=WSPD_BOUNDS,
@@ -2082,7 +2106,7 @@ def plot_level_windspeed(lat, lon, fields, lev, cycle_id):
     wind_barbs(ax, lon, lat, {'u': np.asarray(fields[ukey], float),
                               'v': np.asarray(fields[vkey], float)})
     add_lbf_city_values(ax,lat,lon,wspd,'pressure_wind',lambda v:f'{v:.0f} kt')
-    filename = f'hrrr_wspd{lev}_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename = f'rrfs_mpas_wspd{lev}_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig, ax, filename, label=f'{lev}-mb Wind Speed (kt)', cf=cf)
     return filename
 
@@ -2101,7 +2125,7 @@ def plot_level_relative_vorticity(lat, lon, fields, lev, cycle_id, grad):
     if vort is None or not np.isfinite(vort).any():
         print(f'Skipping {lev}-mb relative vorticity: no valid calculated values')
         return None
-    title = f'HRRR | {lev} mb Relative Vorticity, Heights, and Winds'
+    title = f'RRFS-MPAS | {lev} mb Relative Vorticity, Heights, and Winds'
     fig, ax = new_map(title, title_info(cycle_id))
     x, y, z = mesh_values(lon, lat, vort)
     cf = ax.contourf(x, y, z, levels=VORTICITY_BOUNDS,
@@ -2115,7 +2139,7 @@ def plot_level_relative_vorticity(lat, lon, fields, lev, cycle_id, grad):
         'v': np.asarray(fields[f'v{lev}'], float)
     })
     # No numeric city values for pressure-level vorticity maps.
-    filename = f'hrrr_rvort{lev}_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
+    filename = f'rrfs_mpas_rvort{lev}_{DOMAIN_NAME}_{cycle_id}_f{FORECAST_HOUR:03d}.png'
     finish(fig, ax, filename,
            label=f'{lev}-mb Relative Vorticity (10⁻⁵ s⁻¹)',
            cf=cf, colorbar_extend='both')
@@ -2126,9 +2150,9 @@ def stage_site_run(payload):
     """Prepare a LOCAL site directory; no S3 credentials or uploads required.
 
     Compatible future path convention:
-      runs/cams/hrrr/winter/{cycle}/{domain}/{product}_f006.png
-      runs/cams/hrrr/winter/{cycle}/manifest_f006.json
-      runs/cams/hrrr/winter/runs.json
+      runs/cams/rrfs_mpas/winter/{cycle}/{domain}/{product}_f006.png
+      runs/cams/rrfs_mpas/winter/{cycle}/manifest_f006.json
+      runs/cams/rrfs_mpas/winter/runs.json
     """
     if not STAGE_SITE_FILES:
         return None
@@ -2144,7 +2168,7 @@ def stage_site_run(payload):
                 continue
             # Parse EXACT filename from plot functions (never infer time from forecast data).
             match = re.fullmatch(
-                rf'hrrr_(.+)_{re.escape(domain)}_{re.escape(cycle)}_{fcode}\.png',
+                rf'rrfs_mpas_(.+)_{re.escape(domain)}_{re.escape(cycle)}_{fcode}\.png',
                 filename)
             product_id = match.group(1) if match else filename[:-4]
             destination = site / cycle / domain / f'{product_id}_{fcode}.png'
@@ -2161,7 +2185,7 @@ def stage_site_run(payload):
         'cycle': cycle,
         'forecast_hour': payload['forecast_hour'],
         'valid_time_utc': payload['valid_time_utc'],
-        'experimental': False,
+        'experimental': True,
         'disclaimer': payload['disclaimer'],
         'domains': product_index,
         'available_fields': payload['available_fields'],
@@ -2186,189 +2210,22 @@ def stage_site_run(payload):
         'domains': list(product_index),
     })
     entries.sort(key=lambda x: (x['cycle'], x['forecast_hour']), reverse=True)
-    index_path.write_text(json.dumps({'schema_version':1,'model':'hrrr',
+    index_path.write_text(json.dumps({'schema_version':1,'model':'rrfs_mpas',
                                      'experimental':True,'runs':entries},indent=2))
     print('Site-ready local files:', site)
     print('Site index:', index_path)
     return str(index_path)
 
-
-# ──────────────────────────────────────────────────────────────────
-# PARALLEL MAP RENDERING (SAME forecast hour, not forecast-hour sharding)
-# The Linux 'fork' start method inherits NumPy arrays as copy-on-write pages.
-# No GRIB reread, no duplicative download, and no large arrays sent to workers.
-# Each worker writes distinct PNG filenames. AWS is published ONLY after all
-# workers complete, by scripts/publish_hrrr_winter.py in the parent pipeline.
-# ──────────────────────────────────────────────────────────────────
-_PLOT_SHARED = None  # (lat, lon, rotated fields, cycle_id), inherited via fork
-_PLOT_GRAD = None    # calculated lazily in each worker only when needed
-_PLOT_DIAGS = {}     # per-worker pressure-level diagnosis cache
-
-
-def _build_plot_tasks():
-    """List enabled maps in the original sequential output order."""
-    tasks = []
-    if DO_PTYPE:
-        if DO_PTYPE_REF1KM:
-            tasks.append(('ptype', 'ref1km'))
-        if DO_PTYPE_COMPOSITE:
-            tasks.append(('ptype', 'refcomp'))
-    if DO_QPF:
-        tasks.append(('qpf',))
-    if DO_ACCUM_SNOWFALL:
-        tasks.append(('asnow',))
-    if DO_SNOWFALL_10TO1:
-        tasks.append(('snow10to1',))
-    if DO_SNOW_WATER_EQUIV:
-        tasks.append(('weasd',))
-    if DO_2M_TEMP:
-        tasks.append(('t2m',))
-    if DO_10M_GUST:
-        tasks.append(('gust10m',))
-    if DO_10M_WSPD_MSLP:
-        tasks.append(('wspd10m',))
-    if DO_2M_RH:
-        tasks.append(('rh2m',))
-    if DO_2M_DEWPOINT:
-        tasks.append(('d2m',))
-    if DO_LEVEL_TEMP:
-        for lev in LEVELS_HPA:
-            tasks.append(('level_temp', lev))
-    if DO_LEVEL_WSPD:
-        for lev in LEVELS_HPA:
-            tasks.append(('level_wspd', lev))
-    if DO_LEVEL_VORTICITY:
-        for lev in VORTICITY_LEVELS_HPA:
-            tasks.append(('vorticity', lev))
-    if DO_ADV or DO_FGEN:
-        for lev in LEVELS_HPA:
-            # Group the advection and frontogenesis products at one level to
-            # avoid calculating the same costly gradients twice.
-            tasks.append(('dynamics', lev))
-    if DO_THICKNESS_MSLP:
-        tasks.append(('thickness',))
-    return tasks
-
-
-def _render_plot_task(task):
-    """Worker function: receive only a small task, not the large HRRR arrays."""
-    global _PLOT_GRAD, _PLOT_DIAGS
-    if _PLOT_SHARED is None:
-        raise RuntimeError('Parallel HRRR plotting arrays were not initialized')
-    lat, lon, fields, cycle_id = _PLOT_SHARED
-    kind, *extra = task
-    if kind == 'ptype':
-        result = plot_ptype(lat, lon, fields, cycle_id, reflectivity_field=extra[0])
-    elif kind == 'qpf':
-        result = plot_qpf(lat, lon, fields, cycle_id)
-    elif kind == 'asnow':
-        result = plot_accumulated_snowfall(lat, lon, fields, cycle_id)
-    elif kind == 'snow10to1':
-        result = plot_snowfall_10to1(lat, lon, fields, cycle_id)
-    elif kind == 'weasd':
-        result = plot_snow_water_equivalent(lat, lon, fields, cycle_id)
-    elif kind == 't2m':
-        result = plot_2m_temperature(lat, lon, fields, cycle_id)
-    elif kind == 'gust10m':
-        result = plot_10m_gust(lat, lon, fields, cycle_id)
-    elif kind == 'wspd10m':
-        result = plot_10m_sustained_wind_mslp(lat, lon, fields, cycle_id)
-    elif kind == 'rh2m':
-        result = plot_2m_rh(lat, lon, fields, cycle_id)
-    elif kind == 'd2m':
-        result = plot_2m_dewpoint(lat, lon, fields, cycle_id)
-    elif kind == 'level_temp':
-        result = plot_level_temperature(lat, lon, fields, extra[0], cycle_id)
-    elif kind == 'level_wspd':
-        result = plot_level_windspeed(lat, lon, fields, extra[0], cycle_id)
-    elif kind == 'vorticity':
-        if _PLOT_GRAD is None:
-            _PLOT_GRAD = GeographicGradient(lat, lon)
-        result = plot_level_relative_vorticity(lat, lon, fields, extra[0],
-                                               cycle_id, _PLOT_GRAD)
-    elif kind == 'dynamics':
-        lev = extra[0]
-        if _PLOT_GRAD is None:
-            _PLOT_GRAD = GeographicGradient(lat, lon)
-        if lev not in _PLOT_DIAGS:
-            _PLOT_DIAGS[lev] = diagnostics_for_level(lev, fields, _PLOT_GRAD)
-        diag = _PLOT_DIAGS[lev]
-        if diag is None:
-            return []
-        outputs = []
-        if DO_ADV:
-            f = plot_adv(lat, lon, diag, lev, cycle_id, fields)
-            if f:
-                outputs.append(f)
-        if DO_FGEN:
-            f = plot_fgen(lat, lon, diag, lev, cycle_id, fields)
-            if f:
-                outputs.append(f)
-        return outputs
-    elif kind == 'thickness':
-        result = plot_thickness(lat, lon, fields, cycle_id)
-    else:
-        raise ValueError(f'Unrecognized HRRR plotting task: {task}')
-    return [result] if result else []
-
-
-def _render_domain_maps(lat, lon, fields, cycle_id):
-    """Plot all products, sharing decoded arrays through fork on Linux."""
-    global _PLOT_SHARED, _PLOT_GRAD, _PLOT_DIAGS
-    tasks = _build_plot_tasks()
-    if not tasks:
-        return []
-    if not (1 <= PLOT_WORKERS <= 8):
-        raise ValueError('WINTER_PLOT_WORKERS must be from 1 to 8')
-    _PLOT_SHARED = (lat, lon, fields, cycle_id)
-    _PLOT_GRAD = None
-    _PLOT_DIAGS = {}
-    try:
-        workers = min(PLOT_WORKERS, len(tasks))
-        if sys.platform != 'linux' and workers > 1:
-            print('Parallel fork map rendering requires Linux; using 1 worker ' 
-                  'on this platform.', flush=True)
-            workers = 1
-        print(f'  [{DOMAIN_NAME}] Rendering {len(tasks)} map tasks using '
-              f'{workers} plotting process(es)', flush=True)
-        if workers == 1:
-            groups = [_render_plot_task(task) for task in tasks]
-        else:
-            # Linux GitHub-hosted runners: fork preserves decoded GRIB arrays
-            # copy-on-write rather than pickling them into every subprocess.
-            with ProcessPoolExecutor(max_workers=workers,
-                                     mp_context=get_context('fork')) as executor:
-                groups = list(executor.map(_render_plot_task, tasks, chunksize=1))
-        # executor.map maintains submission ordering; manifest is unchanged.
-        return [name for group in groups for name in group]
-    finally:
-        _PLOT_SHARED = None
-        _PLOT_GRAD = None
-        _PLOT_DIAGS = {}
-
-
 def run():
     global DOMAIN_NAME,EXTENT
     prepare_assets()
     if not RUN_DOMAINS or any(d not in DOMAINS for d in RUN_DOMAINS):
-        raise ValueError(f'WINTER_DOMAINS must choose from {tuple(DOMAINS)}')
+        raise ValueError(f'MPAS_DOMAINS must choose from {tuple(DOMAINS)}')
     if not (0 <= FORECAST_HOUR <= 120):
-        raise ValueError('WINTER_FHR must be an integer from 0 to 120')
-    print(f'CI config: WINTER_CYCLE={CYCLE_ID}, WINTER_FHR={FORECAST_HOUR}, WINTER_DOMAINS={RUN_DOMAINS}')
-    path,cycle_id=download_grib()   # ONE combined Herbie download for all selected domains
+        raise ValueError('MPAS_FHR must be an integer from 0 to 120')
+    print(f'CI config: MPAS_CYCLE={CYCLE_ID}, MPAS_FHR={FORECAST_HOUR}, MPAS_DOMAINS={RUN_DOMAINS}')
+    path,cycle_id=download_grib()   # ONE FTP retrieval for all selected domains
     lat_all,lon_all,fields_all,uv_flags,wind_grid_meta=read_selected_fields(path,FORECAST_HOUR)
-    # Some GRIB feeds carry 2-m T/Td but omit a standalone 2-m RH message.
-    # When absent, compute physically consistent RH (%) from actual T/Td,
-    # without borrowing data from another model or lead time.
-    if ('rh2m' not in fields_all and
-            't2m' in fields_all and 'd2m' in fields_all):
-        t_c=np.asarray(fields_all['t2m'], dtype=float)-273.15
-        td_c=np.asarray(fields_all['d2m'], dtype=float)-273.15
-        with np.errstate(invalid='ignore', over='ignore'):
-            rh=100.0*np.exp(17.625*td_c/(243.04+td_c)-
-                            17.625*t_c/(243.04+t_c))
-        fields_all['rh2m']=np.clip(rh,0.,100.).astype(np.float32)
-        print('2-m RH: derived from native 2-m T/Td (Magnus formula)')
     results={}
     for domain in RUN_DOMAINS:
         if domain not in DOMAINS:
@@ -2378,16 +2235,56 @@ def run():
         print(f'\\n========== DOMAIN {domain.upper()} | {EXTENT} ==========')
         lat,lon,fields=crop_to_domain(lat_all,lon_all,fields_all)
         fields=rotate_winds_to_earth(lat,lon,fields,uv_flags,wind_grid_meta)
-        # Generate independent PNGs in parallel; only main process stages/publishes.
-        outputs = _render_domain_maps(lat, lon, fields, cycle_id)
-        # Optional montage uses already completed PNGs (never races workers).
-        preview = four_panel_preview(outputs, cycle_id)
-        if preview:
-            outputs.append(preview)
+        outputs=[]
+        def add(fname):
+            if fname: outputs.append(fname)
+        if DO_PTYPE:
+            if DO_PTYPE_REF1KM:
+                add(plot_ptype(lat,lon,fields,cycle_id,reflectivity_field='ref1km'))
+            if DO_PTYPE_COMPOSITE:
+                add(plot_ptype(lat,lon,fields,cycle_id,reflectivity_field='refcomp'))
+        if DO_QPF:
+            add(plot_qpf(lat,lon,fields,cycle_id))
+        if DO_ACCUM_SNOWFALL:
+            add(plot_accumulated_snowfall(lat,lon,fields,cycle_id))
+        if DO_SNOWFALL_10TO1:
+            add(plot_snowfall_10to1(lat,lon,fields,cycle_id))
+        if DO_SNOW_WATER_EQUIV:
+            add(plot_snow_water_equivalent(lat,lon,fields,cycle_id))
+        if DO_2M_TEMP:
+            add(plot_2m_temperature(lat,lon,fields,cycle_id))
+        if DO_10M_GUST:
+            add(plot_10m_gust(lat,lon,fields,cycle_id))
+        if DO_10M_WSPD_MSLP:
+            add(plot_10m_sustained_wind_mslp(lat,lon,fields,cycle_id))
+        if DO_2M_RH:
+            add(plot_2m_rh(lat,lon,fields,cycle_id))
+        if DO_2M_DEWPOINT:
+            add(plot_2m_dewpoint(lat,lon,fields,cycle_id))
+        if DO_LEVEL_TEMP:
+            for lev in LEVELS_HPA:
+                add(plot_level_temperature(lat,lon,fields,lev,cycle_id))
+        if DO_LEVEL_WSPD:
+            for lev in LEVELS_HPA:
+                add(plot_level_windspeed(lat,lon,fields,lev,cycle_id))
+        if DO_LEVEL_VORTICITY or DO_ADV or DO_FGEN:
+            grad=GeographicGradient(lat,lon)
+        if DO_LEVEL_VORTICITY:
+            for lev in VORTICITY_LEVELS_HPA:
+                add(plot_level_relative_vorticity(lat,lon,fields,lev,cycle_id,grad))
+        if DO_ADV or DO_FGEN:
+            for lev in LEVELS_HPA:
+                diag=diagnostics_for_level(lev,fields,grad)
+                if diag is None:continue
+                if DO_ADV:add(plot_adv(lat,lon,diag,lev,cycle_id,fields))
+                if DO_FGEN:add(plot_fgen(lat,lon,diag,lev,cycle_id,fields))
+        if DO_THICKNESS_MSLP:
+            add(plot_thickness(lat,lon,fields,cycle_id))
+        add(four_panel_preview(outputs,cycle_id))
         results[domain]={'extent':EXTENT,'outputs':outputs}
         print(f'Domain {domain}: {len(outputs)} graphic(s) written')
 
-    payload={'model':'hrrr','cycle':cycle_id,'forecast_hour':FORECAST_HOUR,
+    payload={'model':'rrfs_mpas','cycle':cycle_id,'forecast_hour':FORECAST_HOUR,
              'valid_time_utc':(datetime.strptime(cycle_id,'%Y%m%d%H')+
                               timedelta(hours=FORECAST_HOUR)).isoformat()+'Z',
              'domains':results,'available_fields':list(fields_all),
@@ -2398,8 +2295,8 @@ def run():
                                'low_center_max_mslp_hpa':HL_LOW_MAX_PRESSURE_HPA,
                                'mslp_contour_interval_hpa':MSLP_CONTOUR_INTERVAL_HPA,
                                'thickness_contour_interval_dam':THICKNESS_CONTOUR_INTERVAL_DAM},
-             'disclaimer':'Model guidance for evaluation; not an official NWS forecast.'}
-    meta_path=OUT_DIR/f'hrrr_winter_{cycle_id}_f{FORECAST_HOUR:03d}_manifest.json'
+             'disclaimer':'Experimental forecast for evaluation; physical QA before publication.'}
+    meta_path=OUT_DIR/f'rrfs_mpas_winter_{cycle_id}_f{FORECAST_HOUR:03d}_manifest.json'
     meta_path.write_text(json.dumps(payload,indent=2))
     print('\\nComplete:',sum(len(x['outputs']) for x in results.values()),'maps across',
           len(results),'domain(s).')
