@@ -1,29 +1,21 @@
-"""Hourly (00Z..23Z) HRRR Winter CAMs: Herbie retrieval, S3 resume, per-hour publishing.
+"""HRRR winter model processing using NOAA HRRR and Herbie (not GSL FTP).
 
-SAFE FIRST TEST:
-  python scripts/process_hrrr_hourly.py --cycle AUTO --hours 006 --max-hours 1
+Normal cron-job.org dispatches should use --cycle AUTO to start from the
+newest available hourly HRRR cycle, including the 00/06/12/18Z F048 runs.
+The AUTO mode refreshes NOAA's cycle inventory between forecast-hour tasks,
+so a newer cycle can take priority during a long-running job.
 
-AUTOMATIC (after reviewing maps):
-  python scripts/process_hrrr_hourly.py --cycle LATEST --hours ALL \
-    --max-hours 0 --max-wall-minutes 45 --skip-published --publish \
-    --wait-for-new-hours --idle-wait-minutes 15 --poll-seconds 90 --keep-going
+Example automatic invocation:
+  python scripts/process_hrrr_hourly.py --cycle AUTO --hours ALL \
+    --max-hours 0 --lookback-hours 12 --max-wall-minutes 0 \
+    --skip-published --publish --keep-going
 
-NOAA public S3 listing discovers actual published prs+sfc GRIB2 .idx files
-efficiently; Herbie verifies availability and downloads the selected messages. No hypothetical forecast hour is invented.
-Non-extended hourly cycles go through F018; 00/06/12/18 through F048.
-LATEST mode considers the six newest hourly cycles plus the eight newest
-00/06/12/18Z cycles, rather than scanning 95 old cycles for work. Adjust
---recent-cycles and --extended-cycles if your hourly production rate changes.
-Each completed FHR is published with a manifest/index checkpoint; already
-published FHR/domain pairs are skipped at the next run. LATEST + ALL is
-STRICTLY GAP AWARE: within each individual cycle, F003 is never plotted until
-F002 has been published for all requested domains. While plotting F002, new
-F003 availability is detected immediately when F002 finishes. When the queue
-runs dry, the runner polls for newly arriving next-hours for up to its idle
-wait window, without preventing other ready cycles from running. A later cron
-run resumes ALL missing hours from S3; no forecast-hour count cap is applied.
-Plot artifacts are removed locally after publication to save CI storage.
-This does NOT modify RRFS-MPAS scripts or S3 keys.
+For intentional backfills only: --cycle YYYYMMDDHH, LATEST or PRIORITY.
+HRRR standard hourly cycles extend through F018; 00/06/12/18Z through F048.
+Each successful forecast hour is published with a manifest and S3 runs.json
+checkpoint. Already-published cycle/FHR/domain combinations are skipped.
+All existing HRRR map styles and S3 object prefixes remain unchanged.
+This processor does not download or publish RRFS-MPAS data.
 """
 from __future__ import annotations
 import argparse
@@ -128,6 +120,33 @@ def discover_source(lookback_hours: int, now: datetime | None = None) -> dict[st
     return {c: sorted(h) for c, h in sorted(available.items(), reverse=True)}
 
 
+def discover_specific_cycle(cycle: str) -> dict[str, list[int]]:
+    """Retrieve all F000..horizon files for an explicit YYYYMMDDHH cycle.
+
+    Unlike rolling lookback discovery, this works for backfilling older HRRR
+    cycles that NOAA still retains. No cycle-time cutoff is applied.
+    """
+    from boto3.session import Session
+    from botocore import UNSIGNED
+    from botocore.config import Config
+    if not re.fullmatch(r'\d{10}', cycle):
+        raise ValueError('Cycle must be YYYYMMDDHH')
+    client = Session().client('s3', region_name=SOURCE_REGION,
+                              config=Config(signature_version=UNSIGNED,
+                                            retries={'mode': 'standard', 'max_attempts': 4}))
+    prefix = f'hrrr.{cycle[:8]}/conus/hrrr.t{cycle[8:10]}z.'
+    kinds_by_hour: dict[int, set[str]] = defaultdict(set)
+    for page in client.get_paginator('list_objects_v2').paginate(Bucket=SOURCE_BUCKET, Prefix=prefix):
+        for item in page.get('Contents', []):
+            parsed = parse_key(item['Key'])
+            if parsed and parsed[0] == cycle:
+                kinds_by_hour[parsed[1]].add(parsed[2])
+    hours = sorted(fhr for fhr, kinds in kinds_by_hour.items()
+                   if {'wrfprsf', 'wrfsfcf'} <= kinds)
+    print(f'NOAA HRRR {cycle}: {len(hours)} paired FHRs found', flush=True)
+    return {cycle: hours} if hours else {}
+
+
 def published_domains(index: dict[str, Any]) -> dict[tuple[str, int], set[str]]:
     done: dict[tuple[str, int], set[str]] = defaultdict(set)
     for item in index.get('runs', []):
@@ -158,7 +177,7 @@ def remote_index() -> dict:
 def next_unpublished_hour(cycle: str, done: dict[tuple[str, int], set[str]],
                           domains: set[str], requested_hours: set[int] | None) -> int | None:
     """Earliest uncompleted requested FHR. Never assume unavailable == completed."""
-    levels = (range(1, horizon(cycle) + 1) if requested_hours is None else
+    levels = (range(0, horizon(cycle) + 1) if requested_hours is None else
               sorted(h for h in requested_hours if 0 <= h <= horizon(cycle)))
     for fhr in levels:
         if not domains.issubset(done.get((cycle, fhr), set())):
@@ -166,20 +185,18 @@ def next_unpublished_hour(cycle: str, done: dict[tuple[str, int], set[str]],
     return None
 
 
-def select_recent_runs(inventory: dict[str, list[int]], recent_cycles: int = 6,
-                       extended_cycles: int = 8) -> dict[str, list[int]]:
-    """Keep recent hourly cycles AND enough 00/06/12/18 cycles to resume F048.
+def latest_cycle_selection(inventory: dict[str, list[int]], count: int = 3) -> list[str]:
+    """Recent hourly HRRR cycles + most recent 48-hour (00/06/12/18Z) cycle.
 
-    Selection is independent of forecast-hour availability. A missing F002 does
-    not remove a cycle that has F001, and never makes F003 count as complete.
-    The S3 runs.json tracks completed hours. Older cycles stay on S3 even after
-    they age out of this active processing window.
+    Do not scan/process the older 4-day PRIORITY backlog by default. The
+    extended cycle is retained even when the newest 3 are ordinary cycles.
     """
-    ordered = sorted(inventory, reverse=True)
-    latest = ordered[:recent_cycles]
-    extended = [c for c in ordered if int(c[-2:]) in (0, 6, 12, 18)][:extended_cycles]
-    keep = set(latest) | set(extended)
-    return {c: inventory[c] for c in ordered if c in keep}
+    cycles = sorted(inventory, reverse=True)
+    chosen = cycles[:count]
+    extended = next((c for c in cycles if int(c[-2:]) in (0, 6, 12, 18)), None)
+    if extended and extended not in chosen:
+        chosen.append(extended)
+    return chosen
 
 
 def build_plan(inventory: dict[str, list[int]], cycle_spec: str,
@@ -193,13 +210,19 @@ def build_plan(inventory: dict[str, list[int]], cycle_spec: str,
     """
     spec = cycle_spec.strip().upper()
     if spec == 'AUTO':
-        cycles = sorted((c for c, hrs in inventory.items()
-                  if any(h > 0 and (requested_hours is None or h in requested_hours) for h in hrs)), reverse=True)[:1]
-    elif spec in ('PRIORITY', 'LATEST'):
+        # Choose the newest cycle with the first requested forecast hour ready.
+        # This avoids selecting a newer *partial* cycle whose F000 (or the
+        # requested FHR for an explicit test) is not yet available.
+        first_hour = 0 if requested_hours is None else min(requested_hours)
+        cycles = [c for c in sorted(inventory, reverse=True)
+                  if first_hour <= horizon(c) and first_hour in inventory[c]][:1]
+    elif spec == 'LATEST':
+        cycles = latest_cycle_selection(inventory)
+    elif spec == 'PRIORITY':
         cycles = sorted(inventory, reverse=True)
     else:
         if not re.fullmatch(r'\d{10}', spec):
-            raise ValueError('Cycle must be AUTO, LATEST, PRIORITY or YYYYMMDDHH')
+            raise ValueError('Cycle must be LATEST, AUTO, PRIORITY or YYYYMMDDHH')
         cycles = [spec] if spec in inventory else []
     if not cycles:
         return [], 0
@@ -210,7 +233,7 @@ def build_plan(inventory: dict[str, list[int]], cycle_spec: str,
     strict_order = requested_hours is None  # Production ALL; explicit hour test independent.
     for cycle in cycles:
         available = set(inventory[cycle])
-        hours = (range(1, horizon(cycle) + 1) if requested_hours is None
+        hours = (range(0, horizon(cycle) + 1) if requested_hours is None
                  else sorted(h for h in requested_hours if h <= horizon(cycle)))
         for fhr in hours:
             if domains.issubset(done.get((cycle, fhr), set())):
@@ -228,10 +251,13 @@ def build_plan(inventory: dict[str, list[int]], cycle_spec: str,
     if spec not in ('PRIORITY', 'LATEST'):
         plan = sorted(normal, key=lambda item: (item[0], -item[1]), reverse=True)
     else:
-        long_queue.sort(key=lambda item: (item[0], item[1]))
-        # Newest ordinary cycle first, but FORECAST HOURS ASCENDING within each.
-        # Reverse-sorting (cycle, fhr) incorrectly processed F018 before F001.
-        short_queue.sort(key=lambda item: (-int(item[0]), item[1]))
+        if spec == 'LATEST':
+            # Current runs first. Within each cycle, process low FHR first.
+            long_queue.sort(key=lambda item: (-int(item[0]), item[1]))
+            short_queue.sort(key=lambda item: (-int(item[0]), item[1]))
+        else:
+            long_queue.sort(key=lambda item: (item[0], item[1]))
+            short_queue.sort(key=lambda item: (item[0], item[1]), reverse=True)
         plan = []
         a = b = 0
         while a < len(long_queue) or b < len(short_queue):
@@ -309,17 +335,16 @@ def cleanup_published(output: Path, manifest: Path):
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--cycle', default='LATEST', help='LATEST selected recent runs; AUTO newest single run; PRIORITY all lookback; or YYYYMMDDHH')
-    p.add_argument('--hours', default='ALL', help='ALL or 006, 006-012, etc.')
+    p.add_argument('--cycle', default='AUTO',
+                   help='AUTO newest available HRRR (default), LATEST newest 3 + extended, PRIORITY backlog, or YYYYMMDDHH')
+    p.add_argument('--hours', default='ALL', help='ALL (F000 onward) or 006, 006-012, etc.')
     p.add_argument('--domains', default='lbf,regional,central_plains')
     p.add_argument('--max-hours', type=int, default=0, help='0 = no forecast-hour count cap')
-    p.add_argument('--max-wall-minutes', type=int, default=45,
-                   help='Wall time budget; checks between completed hours')
-    p.add_argument('--lookback-hours', type=int, default=48)
-    p.add_argument('--recent-cycles', type=int, default=6,
-                   help='LATEST mode: newest N hourly cycles (default 6)')
-    p.add_argument('--extended-cycles', type=int, default=8,
-                   help='LATEST mode: newest N 00/06/12/18Z cycles (default 8)')
+    p.add_argument('--max-wall-minutes', type=int, default=0,
+                   help='Optional wall time budget; 0 disables the Python cutoff')
+    p.add_argument('--lookback-hours', type=int, default=12)
+    p.add_argument('--refresh-inventory-minutes', type=int, default=5,
+                   help='When AUTO, recheck NOAA for newer cycles between FHRs; 0 disables')
     p.add_argument('--publish', action='store_true')
     p.add_argument('--skip-published', action='store_true')
     p.add_argument('--keep-going', action='store_true')
@@ -332,26 +357,28 @@ def main(argv=None) -> int:
                    help='Maximum time to stay idle waiting for a newly released FHR')
     args = p.parse_args(argv)
     if (args.max_hours < 0 or args.max_wall_minutes < 0 or args.lookback_hours < 0 or
-        args.poll_seconds < 15 or args.idle_wait_minutes < 0 or
-        args.recent_cycles < 1 or args.extended_cycles < 1):
+        args.refresh_inventory_minutes < 0 or args.poll_seconds < 15 or
+        args.idle_wait_minutes < 0):
         p.error('Limits must be >= 0, and poll-seconds must be >= 15')
     domains = [x.strip() for x in args.domains.split(',') if x.strip()]
     if not domains or any(d not in VALID_DOMAINS for d in domains):
         p.error('Domains must come from lbf,regional,central_plains')
     requested = parse_requested_hours(args.hours)
-    inventory = discover_source(args.lookback_hours)
-    print(f'NOAA index contains {sum(map(len, inventory.values()))} paired forecast-hour sets '
-          f'from {len(inventory)} HRRR cycles inside the lookback window', flush=True)
+
+    spec = args.cycle.strip().upper()
+    inventory = (discover_specific_cycle(spec) if re.fullmatch(r'\d{10}', spec)
+                 else discover_source(args.lookback_hours))
+    print(f'NOAA published {sum(map(len, inventory.values()))} paired forecast-hour sets '
+          f'from {len(inventory)} hourly HRRR cycles', flush=True)
     if not inventory:
         raise RuntimeError('No HRRR source inventory available. Check NOAA public bucket.')
-    if args.cycle.strip().upper() == 'LATEST':
-        inventory = select_recent_runs(inventory, args.recent_cycles, args.extended_cycles)
-        print(f'LATEST eligible HRRR cycles ({len(inventory)}): '+', '.join(inventory), flush=True)
     done = published_domains(remote_index()) if args.skip_published else {}
     chosen_domains = set(domains)
     plan, skipped = build_plan(inventory, args.cycle, requested, done,
                                chosen_domains, args.max_hours)
     print(f'Already published for ALL selected domains: {skipped}', flush=True)
+    print('Selected latest cycles: ' + ', '.join(latest_cycle_selection(inventory)) +
+          ' (only relevant for --cycle LATEST)', flush=True)
     print(f'Initially ready {len(plan)} forecast hours (first 20): ' +
           ', '.join(f'{cyc}/F{hr:03d}' for cyc, hr in plan[:20]), flush=True)
     if args.list_only:
@@ -363,6 +390,7 @@ def main(argv=None) -> int:
     output = Path(os.getenv('WINTER_OUT_DIR', BASE / 'hrrr_winter_output')).resolve()
     output.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    last_inventory_refresh = started
     last_progress = started
     last_check = started - args.poll_seconds
     successful: list[tuple[str, int]] = []
@@ -372,6 +400,9 @@ def main(argv=None) -> int:
     spec = args.cycle.strip().upper()
     processed = 0
     from scripts.herbie_hrrr_fetch import is_available
+    print(f'HRRR mode={spec} | NOAA lookback={args.lookback_hours}h | '
+          f'new-cycle refresh={args.refresh_inventory_minutes}m | '
+          f'Python wall cutoff={args.max_wall_minutes}m (0=disabled)', flush=True)
 
     while True:
         elapsed = time.monotonic() - started
@@ -381,6 +412,31 @@ def main(argv=None) -> int:
         if args.max_hours and processed >= args.max_hours:
             print('User-specified forecast-hour count reached.', flush=True)
             break
+
+        # A long render may span a newly published hourly cycle. Refresh the
+        # *cycle list* only between completed hours, never during a render.
+        # Do not run this discovery for a deliberately pinned/backfill cycle.
+        if (spec == 'AUTO' and args.refresh_inventory_minutes > 0 and
+                time.monotonic() - last_inventory_refresh >=
+                args.refresh_inventory_minutes * 60):
+            last_inventory_refresh = time.monotonic()
+            previous = next((c for c in sorted(inventory, reverse=True)
+                             if 0 in inventory[c]), None)
+            try:
+                refreshed = discover_source(args.lookback_hours)
+                if refreshed:
+                    inventory = refreshed
+                    current = next((c for c in sorted(inventory, reverse=True)
+                                    if 0 in inventory[c]), None)
+                    if current and current != previous:
+                        print(f'NEWEST HRRR CYCLE CHANGED: {previous} -> {current}; '
+                              'prioritizing newly available cycle', flush=True)
+                    # A failed old cycle should not block an unrelated newer cycle.
+                    blocked_cycles.intersection_update(inventory)
+            except Exception as exc:
+                # An intermittent NOAA list failure should not interrupt
+                # successfully rendering from the last good inventory.
+                print(f'Nonfatal NOAA cycle refresh warning: {exc}', flush=True)
 
         active_inventory = {cycle: hours for cycle, hours in inventory.items()
                             if cycle not in blocked_cycles}
@@ -398,8 +454,21 @@ def main(argv=None) -> int:
             # Probe for the *next missing* FHR from every still-active cycle.
             # This also catches an hour that appears AFTER the inventory scan.
             print('Waiting for unpublished forecast hours; checking NOAA again...', flush=True)
-            fresh = refresh_expected_hours(inventory, done, chosen_domains, requested,
+            # Probe only tracked latest/extended cycles; never work through old backlog.
+            if spec == 'LATEST':
+                tracked = set(latest_cycle_selection(inventory))
+            elif spec == 'AUTO':
+                first_hour = 0 if requested is None else min(requested)
+                newest = next((c for c in sorted(inventory, reverse=True)
+                               if first_hour in inventory[c]), None)
+                tracked = {newest} if newest else set()
+            else:
+                tracked = set(inventory)
+            scoped_inventory = {c: inventory[c] for c in tracked}
+            fresh = refresh_expected_hours(scoped_inventory, done, chosen_domains, requested,
                                            blocked_cycles=blocked_cycles)
+            for c, hrs in scoped_inventory.items():
+                inventory[c] = hrs
             if fresh:
                 last_progress = time.monotonic()
                 continue
